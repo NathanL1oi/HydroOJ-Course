@@ -1,0 +1,58 @@
+{% extends "layout/basic.html" %}
+{% block content %}
+<div class="row">
+  <div class="medium-9 columns">
+    <div class="section">
+      <div class="section__header">
+        <h1 class="section__title">{{ _('Share Course') }}: {{ cdoc.title }}</h1>
+      </div>
+      <div class="section__body">
+        {% if targets|length > 0 %}
+        <form method="post">
+          <input type="hidden" name="operation" value="share">
+          <div class="row">
+            <div class="columns">
+              <label>{{ _('Target Domain') }}</label>
+              <select name="target" class="select" required>
+                <option value="">{{ _('Select a domain to share this course to') }}</option>
+                {% for domain in targets %}
+                <option value="{{ domain._id }}">{{ domain.name or domain._id }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+          <div class="row">
+            <div class="columns">
+              <button type="submit" class="rounded primary button">{{ _('Share') }}</button>
+              <a href="{{ url('course_edit', cid=cdoc.docId) }}" class="rounded button">{{ _('Cancel') }}</a>
+            </div>
+          </div>
+        </form>
+        {% else %}
+        <p class="text-muted">{{ _('No domains available to share to.') }}</p>
+        <a href="{{ url('course_edit', cid=cdoc.docId) }}" class="rounded button">{{ _('Back') }}</a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="medium-3 columns">
+    <div class="section side">
+      <div class="section__header">
+        <h1 class="section__title">{{ _('Available Domains') }}</h1>
+      </div>
+      <div class="section__body">
+        {% if targets|length > 0 %}
+        <ul class="menu">
+          {% for domain in targets %}
+          <li class="menu__item">{{ domain.name or domain._id }}</li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="text-muted">{{ _('No domains available to share to.') }}</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

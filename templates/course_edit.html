@@ -93,6 +93,9 @@
         {% if cdoc %}
         <hr>
         <h2>{{ _('Danger Zone') }}</h2>
+        <div style="margin-bottom: 12px;">
+          <a href="{{ url('course_share', cid=cdoc.docId) }}" class="rounded button">{{ _('Share to Domain') }}</a>
+        </div>
         <form method="post" onsubmit="return confirm('{{ _('Are you sure you want to delete this course?') }}');">
           <input type="hidden" name="operation" value="delete">
           <button type="submit" class="rounded button danger">{{ _('Delete Course') }}</button>

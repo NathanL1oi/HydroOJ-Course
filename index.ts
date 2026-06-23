@@ -1,7 +1,8 @@
 import { escapeRegExp, pick } from 'lodash';
 import {
-    Context, DiscussionModel, DocumentModel, FileLimitExceededError,
-    FileUploadError, Filter, Handler, NotFoundError, ObjectId, PERM, ProblemModel, PRIV, RecordModel,
+    Context, DiscussionModel, DocumentModel, DomainModel, FileLimitExceededError,
+    FileUploadError, Filter, Handler, NotFoundError, ObjectId, PERM, PermissionError,
+    ProblemModel, PRIV, RecordModel,
     sortFiles, StorageModel, SystemModel, Time, UserModel, ValidationError,
 } from 'hydrooj';
 import { param, post, Types } from 'hydrooj';
@@ -31,6 +32,7 @@ export interface CourseDoc {
     assign?: string[]; // Assigned classes/groups
     classes?: string[]; // Multiple classes support
     teachers?: number[]; // Multiple teachers
+    reference?: { domainId: string; docId: ObjectId };
 }
 
 // Course status document interface (per student progress)
@@ -140,6 +142,44 @@ export const CourseModel = {
 
     isDone(cdoc: CourseDoc) {
         return cdoc.endAt <= new Date();
+    },
+
+    async share(domainId: string, cid: ObjectId, target: string, owner: number): Promise<ObjectId> {
+        const cdoc = await CourseModel.get(domainId, cid);
+        if (!cdoc) throw new CourseNotFoundError(domainId, cid);
+        if (cdoc.reference) throw new ValidationError('reference');
+        const targetDomain = await DomainModel.get(target);
+        if (!targetDomain) throw new NotFoundError(target);
+        const newCid = await CourseModel.add(
+            target,
+            cdoc.title,
+            cdoc.content,
+            owner,
+            cdoc.pids,
+            cdoc.beginAt,
+            cdoc.endAt,
+            {
+                maintainer: cdoc.maintainer,
+                teachers: cdoc.teachers,
+                assign: cdoc.assign,
+                classes: cdoc.classes,
+                reference: { domainId, docId: cid },
+            },
+        );
+        if (cdoc.files?.length) {
+            const copyPromises = cdoc.files
+                .filter((f) => f && f.name)
+                .map((f) => StorageModel.copy(
+                    `course/${domainId}/${cid}/${f.name}`,
+                    `course/${target}/${newCid}/${f.name}`,
+                ));
+            const results = await Promise.allSettled(copyPromises);
+            const successfulFiles = cdoc.files.filter((f, i) => f && f.name && results[i].status === 'fulfilled');
+            if (successfulFiles.length) {
+                await CourseModel.edit(target, newCid, { files: successfulFiles } as any);
+            }
+        }
+        return newCid;
     },
 };
 
@@ -533,6 +573,57 @@ class CourseFileDownloadHandler extends Handler {
     }
 }
 
+// Course Share Handler
+class CourseShareHandler extends Handler {
+    cdoc: CourseDoc;
+
+    @param('cid', Types.ObjectId)
+    async prepare(domainId: string, cid: ObjectId) {
+        this.cdoc = await CourseModel.get(domainId, cid);
+        if (!this.cdoc) throw new CourseNotFoundError(domainId, cid);
+        if (!this.user.own(this.cdoc)) this.checkPerm(PERM.PERM_EDIT_HOMEWORK);
+        else this.checkPerm(PERM.PERM_EDIT_HOMEWORK_SELF);
+        if (this.cdoc.reference) throw new ValidationError('reference');
+    }
+
+    @param('cid', Types.ObjectId)
+    async get(domainId: string, cid: ObjectId) {
+        const dudict = await DomainModel.getDictUserByDomainId(this.user._id);
+        const dids = Object.keys(dudict);
+        const allDomains = await DomainModel.getMulti({ _id: { $in: dids } }).toArray();
+        const sharePolicy = this.domain.share as string | undefined;
+        const targets = allDomains
+            .filter((d) => d._id !== domainId)
+            .filter((d) => {
+                if (!sharePolicy) return true;
+                const allowed = sharePolicy.split(',').map((s) => s.trim());
+                if (allowed.includes('*')) return true;
+                return allowed.includes(d._id);
+            });
+        this.response.template = 'course_share.html';
+        this.response.body = {
+            cdoc: this.cdoc,
+            targets,
+        };
+    }
+
+    @param('cid', Types.ObjectId)
+    @param('target', Types.Name)
+    async postShare(domainId: string, cid: ObjectId, target: string) {
+        const sharePolicy = (this.domain.share || '') as string;
+        const allowed = sharePolicy.split(',').map((s) => s.trim());
+        if (allowed[0] !== '*' && !allowed.includes(target)) {
+            throw new ValidationError('target');
+        }
+        const targetDomain = await DomainModel.get(target);
+        if (!targetDomain) throw new NotFoundError(target);
+        const dudoc = await UserModel.getById(target, this.user._id);
+        if (!dudoc.hasPerm(PERM.PERM_CREATE_HOMEWORK)) throw new PermissionError(PERM.PERM_CREATE_HOMEWORK);
+        const newCid = await CourseModel.share(domainId, cid, target, this.user._id);
+        this.response.redirect = this.url('course_detail', { domainId: target, cid: newCid });
+    }
+}
+
 // Course Scoreboard Handler
 class CourseScoreboardHandler extends Handler {
     @param('cid', Types.ObjectId)
@@ -637,6 +728,7 @@ export async function apply(ctx: Context) {
     ctx.Route('course_file_download', '/course/:cid/file/:filename', CourseFileDownloadHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_scoreboard', '/course/:cid/scoreboard', CourseScoreboardHandler, PERM.PERM_VIEW_HOMEWORK_SCOREBOARD);
     ctx.Route('course_records', '/course/:cid/records', CourseRecordsHandler, PERM.PERM_VIEW_HOMEWORK);
+    ctx.Route('course_share', '/course/:cid/share', CourseShareHandler, PERM.PERM_VIEW_HOMEWORK);
 
     // Add i18n translations
     ctx.i18n.load('zh', {
@@ -678,6 +770,16 @@ export async function apply(ctx: Context) {
         'Submitter': '提交者',
         'Submit Time': '提交时间',
         'No records yet.': '暂无提交记录。',
+        course_share: '分享课程',
+        'Share Course': '分享课程',
+        'Share to Domain': '分享到域',
+        'Target Domain': '目标域',
+        'Select a domain to share this course to': '选择要分享课程的目标域',
+        'Share': '分享',
+        'Available Domains': '可用域',
+        'No domains available to share to.': '没有可分享的目标域。',
+        'This course has already been shared.': '该课程已被分享。',
+        'Course shared successfully.': '课程分享成功。',
     });
 
     ctx.i18n.load('en', {
@@ -719,6 +821,16 @@ export async function apply(ctx: Context) {
         'Submitter': 'Submitter',
         'Submit Time': 'Submit Time',
         'No records yet.': 'No records yet.',
+        course_share: 'Share Course',
+        'Share Course': 'Share Course',
+        'Share to Domain': 'Share to Domain',
+        'Target Domain': 'Target Domain',
+        'Select a domain to share this course to': 'Select a domain to share this course to',
+        'Share': 'Share',
+        'Available Domains': 'Available Domains',
+        'No domains available to share to.': 'No domains available to share to.',
+        'This course has already been shared.': 'This course has already been shared.',
+        'Course shared successfully.': 'Course shared successfully.',
     });
 
     // Register model globally
