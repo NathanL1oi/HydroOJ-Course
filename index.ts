@@ -2,7 +2,7 @@ import { escapeRegExp, pick } from 'lodash';
 import {
     Context, DiscussionModel, DocumentModel, DomainModel, FileLimitExceededError,
     FileUploadError, Filter, Handler, NotFoundError, ObjectId, PERM, PermissionError,
-    ProblemModel, PRIV, RecordModel,
+    ProblemModel, ProblemNotAllowCopyError, ProblemNotFoundError, PRIV, RecordModel,
     sortFiles, StorageModel, SystemModel, Time, UserModel, ValidationError,
 } from 'hydrooj';
 import { param, post, Types } from 'hydrooj';
@@ -33,6 +33,7 @@ export interface CourseDoc {
     classes?: string[]; // Multiple classes support
     teachers?: number[]; // Multiple teachers
     reference?: { domainId: string; docId: ObjectId };
+    sharedTo?: Array<{ domainId: string; docId: ObjectId }>; // Domains this course has been shared to
 }
 
 // Course status document interface (per student progress)
@@ -49,7 +50,89 @@ export interface CourseStatusDoc {
     journal?: Array<{ pid: number; rid: ObjectId; score: number; status: number }>;
 }
 
-const TYPE_COURSE = 50;
+const TYPE_COURSE = 50 as const;
+
+// Check whether a domain's `share` setting allows sharing to the target domain.
+// The setting matches HydroOJ's "Share problem with domain (* for any)" domain
+// option, which gates cross-domain problem copying.
+function isTargetAllowed(share: string | undefined, target: string): boolean {
+    const allowed = (share || '').split(',').map((s) => s.trim()).filter((s) => s);
+    return allowed.includes('*') || allowed.includes(target);
+}
+
+// Copy course problems into the target domain as referenced copies, reusing any
+// copies that already exist in the target domain to avoid duplicates.
+// Returns a map from source pid to the pid in the target domain.
+async function copyCourseProblems(
+    domainId: string, pids: number[], target: string,
+    canViewHidden: number | boolean,
+): Promise<Record<number, number>> {
+    const map: Record<number, number> = {};
+    if (!pids?.length) return map;
+    // Validate that the operator can view every problem (throws on missing/hidden).
+    const pdict = await ProblemModel.getList(
+        domainId, pids, canViewHidden, true, ProblemModel.PROJECTION_PUBLIC,
+    );
+    const existing = await ProblemModel.getMulti(
+        target,
+        { 'reference.domainId': domainId, 'reference.pid': { $in: pids } },
+        ['docId', 'reference'],
+    ).toArray();
+    for (const pid of pids) {
+        const pdoc = pdict[pid];
+        if (!pdoc) throw new ProblemNotFoundError(domainId, pid);
+        let sourceDomain = domainId;
+        let sourcePid = pid;
+        if (pdoc.reference) {
+            // The source problem is itself a copied problem; resolve to its origin.
+            sourceDomain = pdoc.reference.domainId;
+            sourcePid = pdoc.reference.pid;
+            const origin = await ProblemModel.get(sourceDomain, sourcePid, ProblemModel.PROJECTION_PUBLIC, true);
+            if (!origin) throw new ProblemNotFoundError(sourceDomain, sourcePid);
+            const originCopies = await ProblemModel.getMulti(
+                target,
+                { 'reference.domainId': sourceDomain, 'reference.pid': sourcePid },
+                ['docId'],
+            ).toArray();
+            if (originCopies.length) {
+                map[pid] = originCopies[0].docId;
+                continue;
+            }
+        } else {
+            const existingCopy = existing.find(
+                (p) => p.reference?.domainId === domainId && p.reference?.pid === pid,
+            );
+            if (existingCopy) {
+                map[pid] = existingCopy.docId;
+                continue;
+            }
+        }
+        // Enforce the source domain's cross-domain problem sharing policy.
+        const sddoc = await DomainModel.get(sourceDomain);
+        if (!sddoc) throw new NotFoundError(sourceDomain);
+        if (!isTargetAllowed(sddoc.share, target)) throw new ProblemNotAllowCopyError(sourceDomain, target);
+        map[pid] = await ProblemModel.copy(sourceDomain, sourcePid, target);
+    }
+    return map;
+}
+
+// Copy course files into the target domain, skipping files that no longer exist.
+async function copyCourseFiles(
+    domainId: string, cid: ObjectId, target: string, newCid: ObjectId,
+    files: CourseDoc['files'] = [],
+): Promise<CourseDoc['files']> {
+    const copied: CourseDoc['files'] = [];
+    for (const f of files) {
+        if (!f?.name) continue;
+        try {
+            await StorageModel.copy(`course/${domainId}/${cid}/${f.name}`, `course/${target}/${newCid}/${f.name}`);
+            copied.push(f);
+        } catch (e) {
+            // Source file missing; skip it rather than failing the whole share.
+        }
+    }
+    return copied;
+}
 
 // Course Model
 export const CourseModel = {
@@ -144,42 +227,130 @@ export const CourseModel = {
         return cdoc.endAt <= new Date();
     },
 
-    async share(domainId: string, cid: ObjectId, target: string, owner: number): Promise<ObjectId> {
+    async share(
+        domainId: string, cid: ObjectId, target: string, owner: number,
+        canViewHidden: number | boolean = owner,
+    ): Promise<ObjectId> {
         const cdoc = await CourseModel.get(domainId, cid);
         if (!cdoc) throw new CourseNotFoundError(domainId, cid);
         if (cdoc.reference) throw new ValidationError('reference');
         const targetDomain = await DomainModel.get(target);
         if (!targetDomain) throw new NotFoundError(target);
-        const newCid = await CourseModel.add(
-            target,
-            cdoc.title,
-            cdoc.content,
-            owner,
-            cdoc.pids,
-            cdoc.beginAt,
-            cdoc.endAt,
-            {
-                maintainer: cdoc.maintainer,
-                teachers: cdoc.teachers,
-                assign: cdoc.assign,
-                classes: cdoc.classes,
-                reference: { domainId, docId: cid },
-            },
-        );
-        if (cdoc.files?.length) {
-            const copyPromises = cdoc.files
-                .filter((f) => f && f.name)
-                .map((f) => StorageModel.copy(
-                    `course/${domainId}/${cid}/${f.name}`,
-                    `course/${target}/${newCid}/${f.name}`,
-                ));
-            const results = await Promise.allSettled(copyPromises);
-            const successfulFiles = cdoc.files.filter((f, i) => f && f.name && results[i].status === 'fulfilled');
-            if (successfulFiles.length) {
-                await CourseModel.edit(target, newCid, { files: successfulFiles } as any);
+        const pidMap = await copyCourseProblems(domainId, cdoc.pids, target, canViewHidden);
+        const pids = cdoc.pids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
+        const maintainer = [...new Set([...(cdoc.maintainer || []), cdoc.owner])];
+        // Sharing to the same domain again updates the existing copy instead of
+        // creating a duplicate.
+        let newCid: ObjectId | null = (cdoc.sharedTo || []).find((s) => s.domainId === target)?.docId || null;
+        if (newCid) {
+            const tcdoc = await CourseModel.get(target, newCid);
+            if (!tcdoc) {
+                // The shared copy was deleted in the target domain; drop the
+                // stale reference and create a fresh copy.
+                await CourseModel.edit(domainId, cid, {
+                    sharedTo: (cdoc.sharedTo || []).filter((s) => s.domainId !== target),
+                } as any);
+                newCid = null;
+            } else {
+                const mergedMaintainer = [...new Set([...(cdoc.maintainer || []), cdoc.owner, ...(tcdoc.maintainer || [])])];
+                await CourseModel.edit(target, newCid, {
+                    title: cdoc.title,
+                    content: cdoc.content,
+                    pids,
+                    beginAt: cdoc.beginAt,
+                    endAt: cdoc.endAt,
+                    maintainer: mergedMaintainer,
+                    teachers: cdoc.teachers,
+                    assign: cdoc.assign,
+                    classes: cdoc.classes,
+                } as any);
             }
         }
+        if (!newCid) {
+            newCid = await CourseModel.add(
+                target,
+                cdoc.title,
+                cdoc.content,
+                owner,
+                pids,
+                cdoc.beginAt,
+                cdoc.endAt,
+                {
+                    maintainer,
+                    teachers: cdoc.teachers,
+                    assign: cdoc.assign,
+                    classes: cdoc.classes,
+                    reference: { domainId, docId: cid },
+                },
+            );
+            await CourseModel.edit(domainId, cid, {
+                sharedTo: [...(cdoc.sharedTo || []), { domainId: target, docId: newCid }],
+            } as any);
+        }
+        const files = await copyCourseFiles(domainId, cid, target, newCid, cdoc.files);
+        await CourseModel.edit(target, newCid, { files } as any);
         return newCid;
+    },
+
+    // Push the current state of a course to one of its shared copies.
+    async sync(
+        domainId: string, cid: ObjectId, target: string,
+        canViewHidden: number | boolean = 0,
+    ): Promise<ObjectId> {
+        const cdoc = await CourseModel.get(domainId, cid);
+        if (!cdoc) throw new CourseNotFoundError(domainId, cid);
+        const ref = (cdoc.sharedTo || []).find((s) => s.domainId === target);
+        if (!ref) throw new NotFoundError(target);
+        const tcdoc = await CourseModel.get(target, ref.docId);
+        if (!tcdoc) throw new CourseNotFoundError(target, ref.docId);
+        const pidMap = await copyCourseProblems(domainId, cdoc.pids, target, canViewHidden);
+        const pids = cdoc.pids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
+        const maintainer = [...new Set([...(cdoc.maintainer || []), cdoc.owner, ...(tcdoc.maintainer || [])])];
+        const files = await copyCourseFiles(domainId, cid, target, ref.docId, cdoc.files);
+        // Remove files from the copy that no longer exist in the source.
+        const stale = (tcdoc.files || []).filter(
+            (f) => f?.name && !(cdoc.files || []).some((sf) => sf?.name === f.name),
+        );
+        const finalFiles = (files || []).filter((f) => f?.name && !stale.some((s) => s.name === f.name));
+        await CourseModel.edit(target, ref.docId, {
+            title: cdoc.title,
+            content: cdoc.content,
+            pids,
+            beginAt: cdoc.beginAt,
+            endAt: cdoc.endAt,
+            maintainer,
+            teachers: cdoc.teachers,
+            assign: cdoc.assign,
+            classes: cdoc.classes,
+            files: finalFiles,
+        } as any);
+        if (stale.length) {
+            await StorageModel.del(
+                stale.map((f) => `course/${target}/${ref.docId}/${f.name}`),
+                1,
+            );
+        }
+        return ref.docId;
+    },
+
+    // Remove a shared copy in the target domain. Copied problems are kept,
+    // since they may be referenced by other courses in the target domain.
+    async unshare(domainId: string, cid: ObjectId, target: string): Promise<void> {
+        const cdoc = await CourseModel.get(domainId, cid);
+        if (!cdoc) throw new CourseNotFoundError(domainId, cid);
+        const ref = (cdoc.sharedTo || []).find((s) => s.domainId === target);
+        if (!ref) return;
+        const tcdoc = await CourseModel.get(target, ref.docId);
+        if (tcdoc) {
+            await CourseModel.del(target, ref.docId);
+            await StorageModel.del(
+                (tcdoc.files || []).filter((f) => f?.name).map((f) => `course/${target}/${ref.docId}/${f.name}`),
+                1,
+            );
+        }
+        await CourseModel.edit(domainId, cid, {
+            sharedTo: (cdoc.sharedTo || []).filter((s) => s.domainId !== target),
+        } as any);
     },
 };
 
@@ -329,6 +500,20 @@ class CourseDetailHandler extends Handler {
 
         // Filter out any files with null/undefined names before sorting
         const validFiles = (this.cdoc.files || []).filter((f) => f && f.name);
+
+        // If this course is a shared copy, resolve the source course for display.
+        let source: { ddoc: any; cdoc: CourseDoc } | null = null;
+        if (this.cdoc.reference) {
+            const [ddoc, scdoc] = await Promise.all([
+                DomainModel.get(this.cdoc.reference.domainId),
+                CourseModel.get(this.cdoc.reference.domainId, this.cdoc.reference.docId),
+            ]);
+            if (ddoc && scdoc) source = { ddoc, cdoc: scdoc };
+        }
+
+        const canShare = this.user.own(this.cdoc)
+            || (this.cdoc.teachers || []).includes(this.user._id)
+            || this.user.hasPerm(PERM.PERM_EDIT_HOMEWORK);
         
         this.response.template = 'course_detail.html';
         this.response.body = {
@@ -346,6 +531,8 @@ class CourseDetailHandler extends Handler {
             enrolledUdict,
             files: sortFiles(validFiles),
             now: new Date(),
+            source,
+            canShare,
         };
 
         // Replace file:// references
@@ -409,6 +596,7 @@ class CourseEditHandler extends Handler {
             timeBeginText,
             dateEndText,
             timeEndText,
+            canShare: !!(cid && this.cdoc && !this.cdoc.reference),
         };
     }
 
@@ -581,8 +769,9 @@ class CourseShareHandler extends Handler {
     async prepare(domainId: string, cid: ObjectId) {
         this.cdoc = await CourseModel.get(domainId, cid);
         if (!this.cdoc) throw new CourseNotFoundError(domainId, cid);
-        if (!this.user.own(this.cdoc)) this.checkPerm(PERM.PERM_EDIT_HOMEWORK);
-        else this.checkPerm(PERM.PERM_EDIT_HOMEWORK_SELF);
+        const canManage = this.user.own(this.cdoc) || (this.cdoc.teachers || []).includes(this.user._id);
+        if (canManage) this.checkPerm(PERM.PERM_EDIT_HOMEWORK_SELF);
+        else this.checkPerm(PERM.PERM_EDIT_HOMEWORK);
         if (this.cdoc.reference) throw new ValidationError('reference');
     }
 
@@ -592,35 +781,67 @@ class CourseShareHandler extends Handler {
         const dids = Object.keys(dudict);
         const allDomains = await DomainModel.getMulti({ _id: { $in: dids } }).toArray();
         const sharePolicy = this.domain.share as string | undefined;
-        const targets = allDomains
-            .filter((d) => d._id !== domainId)
-            .filter((d) => {
-                if (!sharePolicy) return true;
-                const allowed = sharePolicy.split(',').map((s) => s.trim());
-                if (allowed.includes('*')) return true;
-                return allowed.includes(d._id);
-            });
+        const targets = [];
+        for (const d of allDomains) {
+            if (d._id === domainId) continue;
+            const dudoc = await UserModel.getById(d._id, this.user._id);
+            if (!dudoc || !dudoc.hasPerm(PERM.PERM_CREATE_HOMEWORK)) continue;
+            // If the course contains problems, the source domain must allow
+            // copying problems to the target domain. Courses without problems
+            // can always be shared.
+            if (this.cdoc.pids?.length && !isTargetAllowed(sharePolicy, d._id)) continue;
+            targets.push(d);
+        }
+        const shares = [];
+        for (const ref of this.cdoc.sharedTo || []) {
+            const [ddoc, scdoc] = await Promise.all([
+                DomainModel.get(ref.domainId),
+                CourseModel.get(ref.domainId, ref.docId),
+            ]);
+            if (!ddoc) continue;
+            shares.push({ domain: ddoc, cdoc: scdoc, ref });
+        }
         this.response.template = 'course_share.html';
         this.response.body = {
             cdoc: this.cdoc,
             targets,
+            shares,
+            now: new Date(),
         };
     }
 
     @param('cid', Types.ObjectId)
     @param('target', Types.Name)
     async postShare(domainId: string, cid: ObjectId, target: string) {
-        const sharePolicy = (this.domain.share || '') as string;
-        const allowed = sharePolicy.split(',').map((s) => s.trim());
-        if (allowed[0] !== '*' && !allowed.includes(target)) {
+        if (this.cdoc.pids?.length && !isTargetAllowed(this.domain.share, target)) {
             throw new ValidationError('target');
         }
         const targetDomain = await DomainModel.get(target);
         if (!targetDomain) throw new NotFoundError(target);
         const dudoc = await UserModel.getById(target, this.user._id);
-        if (!dudoc.hasPerm(PERM.PERM_CREATE_HOMEWORK)) throw new PermissionError(PERM.PERM_CREATE_HOMEWORK);
-        const newCid = await CourseModel.share(domainId, cid, target, this.user._id);
+        if (!dudoc || !dudoc.hasPerm(PERM.PERM_CREATE_HOMEWORK)) throw new PermissionError(PERM.PERM_CREATE_HOMEWORK);
+        const newCid = await CourseModel.share(
+            domainId, cid, target, this.user._id,
+            this.user.hasPerm(PERM.PERM_VIEW_PROBLEM_HIDDEN) || this.user._id,
+        );
         this.response.redirect = this.url('course_detail', { domainId: target, cid: newCid });
+    }
+
+    @param('cid', Types.ObjectId)
+    @param('target', Types.Name)
+    async postSync(domainId: string, cid: ObjectId, target: string) {
+        await CourseModel.sync(
+            domainId, cid, target,
+            this.user.hasPerm(PERM.PERM_VIEW_PROBLEM_HIDDEN) || this.user._id,
+        );
+        this.response.redirect = this.url('course_share', { cid });
+    }
+
+    @param('cid', Types.ObjectId)
+    @param('target', Types.Name)
+    async postUnshare(domainId: string, cid: ObjectId, target: string) {
+        await CourseModel.unshare(domainId, cid, target);
+        this.response.redirect = this.url('course_share', { cid });
     }
 }
 
@@ -780,6 +1001,16 @@ export async function apply(ctx: Context) {
         'No domains available to share to.': '没有可分享的目标域。',
         'This course has already been shared.': '该课程已被分享。',
         'Course shared successfully.': '课程分享成功。',
+        'Shared Courses': '已分享的课程',
+        'Sync': '同步',
+        'Revoke': '撤销分享',
+        'Domain': '域',
+        'Actions': '操作',
+        'Ongoing': '进行中',
+        'Ended': '已结束',
+        'Domain share setting hint': '可在当前域的“域设置”中配置允许分享的域(填写 * 表示允许所有域)。',
+        'Shared from domain': '来自域',
+        'Revoke hint': '撤销分享会删除目标域中的课程副本(保留已复制的题目)。',
     });
 
     ctx.i18n.load('en', {
@@ -831,6 +1062,16 @@ export async function apply(ctx: Context) {
         'No domains available to share to.': 'No domains available to share to.',
         'This course has already been shared.': 'This course has already been shared.',
         'Course shared successfully.': 'Course shared successfully.',
+        'Shared Courses': 'Shared Courses',
+        'Sync': 'Sync',
+        'Revoke': 'Revoke',
+        'Domain': 'Domain',
+        'Actions': 'Actions',
+        'Ongoing': 'Ongoing',
+        'Ended': 'Ended',
+        'Domain share setting hint': 'Configure allowed target domains in the "Share problem with domain" domain setting of the source domain (use * to allow all domains).',
+        'Shared from domain': 'Shared from domain',
+        'Revoke hint': 'Revoking deletes the course copy in the target domain (copied problems are kept).',
     });
 
     // Register model globally

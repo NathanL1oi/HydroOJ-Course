@@ -2,6 +2,17 @@
 {% block content %}
 <div class="row">
   <div class="medium-9 columns">
+    {% if source %}
+    <div class="section">
+      <div class="section__body typo">
+        <p class="note">
+          <span class="icon icon-link"></span>
+          {{ _('Shared from domain') }} <strong>{{ source.ddoc.name or source.ddoc._id }}</strong>:
+          <a href="{{ url('course_detail', domainId=source.ddoc._id, cid=source.cdoc.docId) }}">{{ source.cdoc.title }}</a>
+        </p>
+      </div>
+    </div>
+    {% endif %}
     <div class="section">
       <div class="section__header">
         <h1 class="section__title">{{ cdoc.title }}</h1>
@@ -158,6 +169,14 @@
       </div>
       <div class="section__body">
         <ul class="menu">
+          {% if canShare %}
+          <li class="menu__item">
+            <a href="{{ url('course_share', cid=cdoc.docId) }}">
+              <span class="icon icon-link"></span>
+              {{ _('Share Course') }}
+            </a>
+          </li>
+          {% endif %}
           <li class="menu__item">
             <a href="{{ url('course_records', cid=cdoc.docId) }}">
               <span class="icon icon-flag"></span>
