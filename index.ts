@@ -134,6 +134,20 @@ async function copyCourseFiles(
     return copied;
 }
 
+// Inject the course entry into the top navigation bar, after Training and
+// before Contest. HydroOJ exposes this as `ctx.injectUI` in v5; fall back to
+// the legacy `ctx.inject` / `global.Hydro.ui.inject` for older releases.
+function injectCourseNav(ctx: Context) {
+    const args = { prefix: 'course', before: 'contest_main' };
+    if (typeof (ctx as any).injectUI === 'function') {
+        (ctx as any).injectUI('Nav', 'course_main', args, PERM.PERM_VIEW_HOMEWORK);
+    } else if (typeof (ctx as any).inject === 'function') {
+        (ctx as any).inject('Nav', 'course_main', args, PERM.PERM_VIEW_HOMEWORK);
+    } else if (typeof (globalThis as any).Hydro?.ui?.inject === 'function') {
+        (globalThis as any).Hydro.ui.inject('Nav', 'course_main', args, PERM.PERM_VIEW_HOMEWORK);
+    }
+}
+
 // Course Model
 export const CourseModel = {
     TYPE_COURSE,
@@ -950,6 +964,9 @@ export async function apply(ctx: Context) {
     ctx.Route('course_scoreboard', '/course/:cid/scoreboard', CourseScoreboardHandler, PERM.PERM_VIEW_HOMEWORK_SCOREBOARD);
     ctx.Route('course_records', '/course/:cid/records', CourseRecordsHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_share', '/course/:cid/share', CourseShareHandler, PERM.PERM_VIEW_HOMEWORK);
+
+    // Navigation entry: after Training, before Contest.
+    injectCourseNav(ctx);
 
     // Add i18n translations
     ctx.i18n.load('zh', {
