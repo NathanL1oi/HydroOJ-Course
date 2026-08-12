@@ -36,6 +36,16 @@ export interface CourseDoc {
     sharedTo?: Array<{ domainId: string; docId: ObjectId }>; // Domains this course has been shared to
 }
 
+// A nested course chapter. Chapters can contain problems directly and/or
+// contain nested child chapters.
+export interface CourseChapter {
+    _id: number;
+    title: string;
+    content?: string;
+    pids?: number[];
+    children?: CourseChapter[];
+}
+
 // Course status document interface (per student progress)
 export interface CourseStatusDoc {
     _id: ObjectId;
@@ -51,6 +61,78 @@ export interface CourseStatusDoc {
 }
 
 const TYPE_COURSE = 50 as const;
+
+// Collect every problem id from a nested chapter tree. Used to keep the
+// legacy `cdoc.pids` field in sync for permissions, progress, sharing, and
+// fallback rendering.
+function flattenCoursePids(chapters: CourseChapter[] = []): number[] {
+    const pids = new Set<number>();
+    const visit = (nodes: CourseChapter[]) => {
+        for (const node of nodes) {
+            (node.pids || []).forEach((pid) => pids.add(pid));
+            visit(node.children || []);
+        }
+    };
+    visit(chapters);
+    return Array.from(pids);
+}
+
+// Rewrite problem ids in a nested chapter tree after cross-domain copying.
+// Missing mappings are dropped.
+function remapCourseChapters(
+    chapters: CourseChapter[] = [],
+    pidMap: Record<number, number>,
+): CourseChapter[] {
+    return chapters.map((chapter) => ({
+        _id: chapter._id,
+        title: chapter.title,
+        content: chapter.content,
+        pids: (chapter.pids || []).map((pid) => pidMap[pid]).filter((pid) => pid != null),
+        children: remapCourseChapters(chapter.children || [], pidMap),
+    }));
+}
+
+// Parse and validate the JSON produced by the chapter editor. The structure
+// is intentionally simple so older clients can keep using the flat `pids`
+// field without affecting courses that have nested chapters.
+function parseCourseChapters(source: string): CourseChapter[] {
+    if (!source) return [];
+    let parsed: any;
+    try {
+        parsed = JSON.parse(source);
+    } catch (e) {
+        throw new ValidationError('chapters', null, 'Invalid chapter JSON');
+    }
+    if (!Array.isArray(parsed)) throw new ValidationError('chapters', null, 'Chapters must be an array');
+    const ids = new Set<number>();
+    const pids = new Set<number>();
+    const validate = (nodes: any[]): CourseChapter[] => nodes.map((node) => {
+        const _id = Number(node?._id);
+        const title = String(node?.title || '').trim();
+        if (!_id || !Number.isSafeInteger(_id)) throw new ValidationError('chapters', null, 'Each chapter needs a numeric _id');
+        if (ids.has(_id)) throw new ValidationError('chapters', null, 'Chapter _id must be unique');
+        if (!title) throw new ValidationError('chapters', null, 'Each chapter needs a title');
+        ids.add(_id);
+        const nodePids = Array.isArray(node?.pids)
+            ? node.pids.map((pid: any) => Number(pid)).filter((pid: number) => Number.isSafeInteger(pid) && pid > 0)
+            : [];
+        nodePids.forEach((pid: number) => pids.add(pid));
+        return {
+            _id,
+            title,
+            content: typeof node?.content === 'string' ? node.content : '',
+            pids: Array.from(new Set(nodePids)),
+            children: Array.isArray(node?.children) ? validate(node.children) : [],
+        };
+    });
+    return validate(parsed);
+}
+
+function courseChaptersForEditor(cdoc: CourseDoc | null): CourseChapter[] {
+    if (cdoc?.chapters?.length) return cdoc.chapters;
+    if (cdoc?.pids?.length) return [{ _id: 1, title: 'Chapter 1', pids: cdoc.pids }];
+    return [];
+}
 
 // Check whether a domain's `share` setting allows sharing to the target domain.
 // The setting matches HydroOJ's "Share problem with domain (* for any)" domain
@@ -250,8 +332,10 @@ export const CourseModel = {
         if (cdoc.reference) throw new ValidationError('reference');
         const targetDomain = await DomainModel.get(target);
         if (!targetDomain) throw new NotFoundError(target);
-        const pidMap = await copyCourseProblems(domainId, cdoc.pids, target, canViewHidden);
-        const pids = cdoc.pids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
+        const sourcePids = flattenCoursePids(cdoc.chapters).length ? flattenCoursePids(cdoc.chapters) : cdoc.pids;
+        const pidMap = await copyCourseProblems(domainId, sourcePids, target, canViewHidden);
+        const pids = sourcePids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
+        const chapters = cdoc.chapters?.length ? remapCourseChapters(cdoc.chapters, pidMap) : undefined;
         const maintainer = [...new Set([...(cdoc.maintainer || []), cdoc.owner])];
         // Sharing to the same domain again updates the existing copy instead of
         // creating a duplicate.
@@ -271,6 +355,7 @@ export const CourseModel = {
                     title: cdoc.title,
                     content: cdoc.content,
                     pids,
+                    ...(chapters ? { chapters } : {}),
                     beginAt: cdoc.beginAt,
                     endAt: cdoc.endAt,
                     maintainer: mergedMaintainer,
@@ -294,6 +379,7 @@ export const CourseModel = {
                     teachers: cdoc.teachers,
                     assign: cdoc.assign,
                     classes: cdoc.classes,
+                    ...(chapters ? { chapters } : {}),
                     reference: { domainId, docId: cid },
                 },
             );
@@ -317,8 +403,10 @@ export const CourseModel = {
         if (!ref) throw new NotFoundError(target);
         const tcdoc = await CourseModel.get(target, ref.docId);
         if (!tcdoc) throw new CourseNotFoundError(target, ref.docId);
-        const pidMap = await copyCourseProblems(domainId, cdoc.pids, target, canViewHidden);
-        const pids = cdoc.pids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
+        const sourcePids = flattenCoursePids(cdoc.chapters).length ? flattenCoursePids(cdoc.chapters) : cdoc.pids;
+        const pidMap = await copyCourseProblems(domainId, sourcePids, target, canViewHidden);
+        const pids = sourcePids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
+        const chapters = cdoc.chapters?.length ? remapCourseChapters(cdoc.chapters, pidMap) : undefined;
         const maintainer = [...new Set([...(cdoc.maintainer || []), cdoc.owner, ...(tcdoc.maintainer || [])])];
         const files = await copyCourseFiles(domainId, cid, target, ref.docId, cdoc.files);
         // Remove files from the copy that no longer exist in the source.
@@ -330,6 +418,7 @@ export const CourseModel = {
             title: cdoc.title,
             content: cdoc.content,
             pids,
+            ...(chapters ? { chapters } : {}),
             beginAt: cdoc.beginAt,
             endAt: cdoc.endAt,
             maintainer,
@@ -601,11 +690,13 @@ class CourseEditHandler extends Handler {
         }
         
         this.response.template = 'course_edit.html';
+        const chapters = courseChaptersForEditor(this.cdoc);
         this.response.body = {
             cdoc: this.cdoc,
             groups,
             page_name: cid ? 'course_edit' : 'course_create',
             pids: this.cdoc ? this.cdoc.pids.join(',') : '',
+            chaptersJson: JSON.stringify(chapters),
             dateBeginText,
             timeBeginText,
             dateEndText,
@@ -618,6 +709,7 @@ class CourseEditHandler extends Handler {
     @param('title', Types.Title)
     @param('content', Types.Content)
     @param('pids', Types.Content, true)
+    @param('chapters', Types.Content, true)
     @param('beginAtDate', Types.Date)
     @param('beginAtTime', Types.Time)
     @param('endAtDate', Types.Date)
@@ -632,6 +724,7 @@ class CourseEditHandler extends Handler {
         title: string,
         content: string,
         _pids: string = '',
+        _chapters: string = '',
         beginAtDate: string,
         beginAtTime: string,
         endAtDate: string,
@@ -641,7 +734,10 @@ class CourseEditHandler extends Handler {
         assign: string[] = [],
         classes: string[] = [],
     ) {
-        const pids = _pids.replace(/，/g, ',').split(',').map((i) => +i).filter((i) => i);
+        const chapters = _chapters ? parseCourseChapters(_chapters) : [];
+        const pids = _chapters
+            ? flattenCoursePids(chapters)
+            : _pids.replace(/，/g, ',').split(',').map((i) => +i).filter((i) => i);
         const beginAt = new Date(`${beginAtDate} ${beginAtTime}`);
         const endAt = new Date(`${endAtDate} ${endAtTime}`);
 
@@ -660,6 +756,7 @@ class CourseEditHandler extends Handler {
                 teachers,
                 assign,
                 classes,
+                ...(chapters.length ? { chapters } : {}),
             });
         } else {
             await CourseModel.edit(domainId, cid, {
@@ -672,6 +769,7 @@ class CourseEditHandler extends Handler {
                 teachers,
                 assign,
                 classes,
+                ...(chapters.length ? { chapters } : {}),
             });
         }
 
