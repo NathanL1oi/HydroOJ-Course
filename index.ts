@@ -1,7 +1,8 @@
 import { escapeRegExp, pick } from 'lodash';
 import {
-    Context, DiscussionModel, DocumentModel, FileLimitExceededError,
-    FileUploadError, Filter, Handler, NotFoundError, ObjectId, PERM, ProblemModel, PRIV, RecordModel,
+    Context, DiscussionModel, DocumentModel, DomainModel, FileLimitExceededError,
+    FileUploadError, Filter, Handler, NotFoundError, ObjectId, PERM, PermissionError,
+    ProblemModel, ProblemNotAllowCopyError, ProblemNotFoundError, PRIV, RecordModel,
     sortFiles, StorageModel, SystemModel, Time, UserModel, ValidationError,
 } from 'hydrooj';
 import { param, post, Types } from 'hydrooj';
@@ -31,6 +32,8 @@ export interface CourseDoc {
     assign?: string[]; // Assigned classes/groups
     classes?: string[]; // Multiple classes support
     teachers?: number[]; // Multiple teachers
+    reference?: { domainId: string; docId: ObjectId }; // Original course for shared copies
+    sharedTo?: Array<{ domainId: string; docId: ObjectId }>; // Domains this course has been shared to
 }
 
 // Course status document interface (per student progress)
@@ -47,7 +50,105 @@ export interface CourseStatusDoc {
     journal?: Array<{ pid: number; rid: ObjectId; score: number; status: number }>;
 }
 
-const TYPE_COURSE = 50;
+const TYPE_COURSE = 50 as const;
+
+// Check whether a domain's `share` setting allows sharing to the target domain.
+// The setting matches HydroOJ's "Share problem with domain (* for any)" domain
+// option, which gates cross-domain problem copying.
+function isTargetAllowed(share: string | undefined, target: string): boolean {
+    const allowed = (share || '').split(',').map((s) => s.trim()).filter((s) => s);
+    return allowed.includes('*') || allowed.includes(target);
+}
+
+// Copy course problems into the target domain as referenced copies, reusing any
+// copies that already exist in the target domain to avoid duplicates.
+// Returns a map from source pid to the pid in the target domain.
+async function copyCourseProblems(
+    domainId: string,
+    pids: number[],
+    target: string,
+    canViewHidden: number | boolean,
+): Promise<Record<number, number>> {
+    const map: Record<number, number> = {};
+    if (!pids?.length) return map;
+
+    // Validate that the operator can view every problem (throws on missing/hidden).
+    const pdict = await ProblemModel.getList(
+        domainId,
+        pids,
+        canViewHidden,
+        true,
+        ProblemModel.PROJECTION_PUBLIC,
+    );
+
+    const existing = await ProblemModel.getMulti(
+        target,
+        { 'reference.domainId': domainId, 'reference.pid': { $in: pids } },
+        ['docId', 'reference'],
+    ).toArray();
+
+    for (const pid of pids) {
+        const pdoc = pdict[pid];
+        if (!pdoc) throw new ProblemNotFoundError(domainId, pid);
+
+        let sourceDomain = domainId;
+        let sourcePid = pid;
+
+        if (pdoc.reference) {
+            // The source problem is itself a copied problem; resolve to its origin.
+            sourceDomain = pdoc.reference.domainId;
+            sourcePid = pdoc.reference.pid;
+            const origin = await ProblemModel.get(sourceDomain, sourcePid, ProblemModel.PROJECTION_PUBLIC, true);
+            if (!origin) throw new ProblemNotFoundError(sourceDomain, sourcePid);
+            const originCopies = await ProblemModel.getMulti(
+                target,
+                { 'reference.domainId': sourceDomain, 'reference.pid': sourcePid },
+                ['docId'],
+            ).toArray();
+            if (originCopies.length) {
+                map[pid] = originCopies[0].docId;
+                continue;
+            }
+        } else {
+            const existingCopy = existing.find(
+                (p) => p.reference?.domainId === domainId && p.reference?.pid === pid,
+            );
+            if (existingCopy) {
+                map[pid] = existingCopy.docId;
+                continue;
+            }
+        }
+
+        // Enforce the source domain's cross-domain problem sharing policy.
+        const sddoc = await DomainModel.get(sourceDomain);
+        if (!sddoc) throw new NotFoundError(sourceDomain);
+        if (!isTargetAllowed(sddoc.share, target)) throw new ProblemNotAllowCopyError(sourceDomain, target);
+        map[pid] = await ProblemModel.copy(sourceDomain, sourcePid, target);
+    }
+
+    return map;
+}
+
+// Copy course files into the target domain, skipping files that no longer exist.
+async function copyCourseFiles(
+    domainId: string,
+    cid: ObjectId,
+    target: string,
+    newCid: ObjectId,
+    files: CourseDoc['files'] = [],
+): Promise<CourseDoc['files']> {
+    const copied: CourseDoc['files'] = [];
+    for (const f of files) {
+        if (!f?.name) continue;
+        try {
+            await StorageModel.copy(`course/${domainId}/${cid}/${f.name}`, `course/${target}/${newCid}/${f.name}`);
+            copied.push(f);
+        } catch (e) {
+            // Source file missing; skip it rather than failing the whole share.
+        }
+    }
+    return copied;
+}
 
 // Course Model
 export const CourseModel = {
@@ -141,6 +242,147 @@ export const CourseModel = {
     isDone(cdoc: CourseDoc) {
         return cdoc.endAt <= new Date();
     },
+
+    async share(
+        domainId: string,
+        cid: ObjectId,
+        target: string,
+        owner: number,
+        canViewHidden: number | boolean = owner,
+    ): Promise<ObjectId> {
+        const cdoc = await CourseModel.get(domainId, cid);
+        if (!cdoc) throw new CourseNotFoundError(domainId, cid);
+        if (cdoc.reference) throw new ValidationError('reference');
+
+        const targetDomain = await DomainModel.get(target);
+        if (!targetDomain) throw new NotFoundError(target);
+
+        const pidMap = await copyCourseProblems(domainId, cdoc.pids, target, canViewHidden);
+        const pids = cdoc.pids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
+        const maintainer = [...new Set([...(cdoc.maintainer || []), cdoc.owner])];
+
+        // Sharing to the same domain again updates the existing copy instead of
+        // creating a duplicate.
+        let newCid: ObjectId | null = (cdoc.sharedTo || []).find((s) => s.domainId === target)?.docId || null;
+        if (newCid) {
+            const tcdoc = await CourseModel.get(target, newCid);
+            if (!tcdoc) {
+                // The shared copy was deleted in the target domain; drop the
+                // stale reference and create a fresh copy.
+                await CourseModel.edit(domainId, cid, {
+                    sharedTo: (cdoc.sharedTo || []).filter((s) => s.domainId !== target),
+                } as any);
+                newCid = null;
+            } else {
+                const mergedMaintainer = [...new Set([...(cdoc.maintainer || []), cdoc.owner, ...(tcdoc.maintainer || [])])];
+                await CourseModel.edit(target, newCid, {
+                    title: cdoc.title,
+                    content: cdoc.content,
+                    pids,
+                    beginAt: cdoc.beginAt,
+                    endAt: cdoc.endAt,
+                    maintainer: mergedMaintainer,
+                    teachers: cdoc.teachers,
+                    assign: cdoc.assign,
+                    classes: cdoc.classes,
+                } as any);
+            }
+        }
+
+        if (!newCid) {
+            newCid = await CourseModel.add(
+                target,
+                cdoc.title,
+                cdoc.content,
+                owner,
+                pids,
+                cdoc.beginAt,
+                cdoc.endAt,
+                {
+                    maintainer,
+                    teachers: cdoc.teachers,
+                    assign: cdoc.assign,
+                    classes: cdoc.classes,
+                    reference: { domainId, docId: cid },
+                },
+            );
+            await CourseModel.edit(domainId, cid, {
+                sharedTo: [...(cdoc.sharedTo || []), { domainId: target, docId: newCid }],
+            } as any);
+        }
+
+        const files = await copyCourseFiles(domainId, cid, target, newCid, cdoc.files);
+        await CourseModel.edit(target, newCid, { files } as any);
+        return newCid;
+    },
+
+    // Push the current state of a course to one of its shared copies.
+    async sync(
+        domainId: string,
+        cid: ObjectId,
+        target: string,
+        canViewHidden: number | boolean = 0,
+    ): Promise<ObjectId> {
+        const cdoc = await CourseModel.get(domainId, cid);
+        if (!cdoc) throw new CourseNotFoundError(domainId, cid);
+        const ref = (cdoc.sharedTo || []).find((s) => s.domainId === target);
+        if (!ref) throw new NotFoundError(target);
+        const tcdoc = await CourseModel.get(target, ref.docId);
+        if (!tcdoc) throw new CourseNotFoundError(target, ref.docId);
+
+        const pidMap = await copyCourseProblems(domainId, cdoc.pids, target, canViewHidden);
+        const pids = cdoc.pids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
+        const maintainer = [...new Set([...(cdoc.maintainer || []), cdoc.owner, ...(tcdoc.maintainer || [])])];
+        const files = await copyCourseFiles(domainId, cid, target, ref.docId, cdoc.files);
+
+        // Remove files from the copy that no longer exist in the source.
+        const stale = (tcdoc.files || []).filter(
+            (f) => f?.name && !(cdoc.files || []).some((sf) => sf?.name === f.name),
+        );
+        const finalFiles = (files || []).filter((f) => f?.name && !stale.some((s) => s.name === f.name));
+
+        await CourseModel.edit(target, ref.docId, {
+            title: cdoc.title,
+            content: cdoc.content,
+            pids,
+            beginAt: cdoc.beginAt,
+            endAt: cdoc.endAt,
+            maintainer,
+            teachers: cdoc.teachers,
+            assign: cdoc.assign,
+            classes: cdoc.classes,
+            files: finalFiles,
+        } as any);
+
+        if (stale.length) {
+            await StorageModel.del(
+                stale.map((f) => `course/${target}/${ref.docId}/${f.name}`),
+                1,
+            );
+        }
+        return ref.docId;
+    },
+
+    // Remove a shared copy in the target domain. Copied problems are kept,
+    // since they may be referenced by other courses in the target domain.
+    async unshare(domainId: string, cid: ObjectId, target: string): Promise<void> {
+        const cdoc = await CourseModel.get(domainId, cid);
+        if (!cdoc) throw new CourseNotFoundError(domainId, cid);
+        const ref = (cdoc.sharedTo || []).find((s) => s.domainId === target);
+        if (!ref) return;
+
+        const tcdoc = await CourseModel.get(target, ref.docId);
+        if (tcdoc) {
+            await CourseModel.del(target, ref.docId);
+            await StorageModel.del(
+                (tcdoc.files || []).filter((f) => f?.name).map((f) => `course/${target}/${ref.docId}/${f.name}`),
+                1,
+            );
+        }
+        await CourseModel.edit(domainId, cid, {
+            sharedTo: (cdoc.sharedTo || []).filter((s) => s.domainId !== target),
+        } as any);
+    },
 };
 
 // Error class for course not found
@@ -161,11 +403,9 @@ class CourseMainHandler extends Handler {
             .map((i) => i.name);
 
         const escaped = escapeRegExp(q.toLowerCase());
-        
-        // Build base query
+
         const query: Filter<CourseDoc> = {};
-        
-        // Access control query
+
         if (!(this.user.hasPerm(PERM.PERM_VIEW_HIDDEN_HOMEWORK) && !group)) {
             const accessConditions = [
                 { maintainer: this.user._id },
@@ -175,17 +415,15 @@ class CourseMainHandler extends Handler {
                 { classes: { $in: groups } },
                 { assign: { $size: 0 } },
             ];
-            
+
             if (group) {
-                // Filter by specific group/class
                 accessConditions.push({ assign: { $in: [group] } });
                 accessConditions.push({ classes: { $in: [group] } });
             }
-            
+
             query.$or = accessConditions;
         }
-        
-        // Title search query
+
         if (q) {
             query.title = { $regex: new RegExp(q.length >= 2 ? escaped : `^${escaped}`, 'gim') };
         }
@@ -233,7 +471,6 @@ class CourseDetailHandler extends Handler {
         this.cdoc = await CourseModel.get(domainId, cid);
         if (!this.cdoc) throw new CourseNotFoundError(domainId, cid);
 
-        // Check if user has access
         if (this.cdoc.assign?.length && !this.user.own(this.cdoc) && !this.user.hasPerm(PERM.PERM_VIEW_HIDDEN_HOMEWORK)) {
             const groups = (await UserModel.listGroup(domainId, this.user._id)).map((g) => g.name);
             const hasAccess = this.cdoc.assign.some((a) => groups.includes(a))
@@ -250,19 +487,16 @@ class CourseDetailHandler extends Handler {
     async get(domainId: string, cid: ObjectId, page = 1) {
         const csdoc = await CourseModel.getStatus(domainId, cid, this.user._id);
 
-        // Get discussions
         const [ddocs, dpcount, dcount] = await this.paginate(
             DiscussionModel.getMulti(domainId, { parentType: TYPE_COURSE, parentId: cid }),
             page,
             'discussion',
         );
 
-        // Get user info
         const uids = [this.cdoc.owner, ...(this.cdoc.maintainer || []), ...(this.cdoc.teachers || [])];
         ddocs.forEach((ddoc) => uids.push(ddoc.owner));
         const udict = await UserModel.getList(domainId, uids);
 
-        // Get enrolled users for sidebar
         let enrolledUsers: number[] = [];
         if (this.user.hasPriv(PRIV.PRIV_USER_PROFILE)) {
             enrolledUsers = (await CourseModel.getMultiStatus(domainId, { docId: cid, uid: { $gt: 1 }, attend: 1 })
@@ -270,10 +504,8 @@ class CourseDetailHandler extends Handler {
         }
         const enrolledUdict = await UserModel.getListForRender(domainId, enrolledUsers);
 
-        // Get problems
         const pdict = await ProblemModel.getList(domainId, this.cdoc.pids, true, true);
 
-        // Get problem status for current user
         let psdict = {};
         let rdict = {};
         if (csdoc) {
@@ -287,9 +519,22 @@ class CourseDetailHandler extends Handler {
             }
         }
 
-        // Filter out any files with null/undefined names before sorting
         const validFiles = (this.cdoc.files || []).filter((f) => f && f.name);
-        
+
+        let source: { ddoc: any; cdoc: CourseDoc } | null = null;
+        if (this.cdoc.reference) {
+            const [ddoc, scdoc] = await Promise.all([
+                DomainModel.get(this.cdoc.reference.domainId),
+                CourseModel.get(this.cdoc.reference.domainId, this.cdoc.reference.docId),
+            ]);
+            if (ddoc && scdoc) source = { ddoc, cdoc: scdoc };
+        }
+
+        const canShare = !this.cdoc.reference
+            && (this.user.own(this.cdoc)
+                || (this.cdoc.teachers || []).includes(this.user._id)
+                || this.user.hasPerm(PERM.PERM_EDIT_HOMEWORK));
+
         this.response.template = 'course_detail.html';
         this.response.body = {
             cdoc: this.cdoc,
@@ -306,9 +551,10 @@ class CourseDetailHandler extends Handler {
             enrolledUdict,
             files: sortFiles(validFiles),
             now: new Date(),
+            source,
+            canShare,
         };
 
-        // Replace file:// references
         this.response.body.cdoc.content = this.response.body.cdoc.content
             .replace(/\(file:\/\//g, `(./${cid}/file/`)
             .replace(/="file:\/\//g, `="./${cid}/file/`);
@@ -343,13 +589,12 @@ class CourseEditHandler extends Handler {
     @param('cid', Types.ObjectId, true)
     async get(domainId: string, cid?: ObjectId) {
         const groups = await UserModel.listGroup(domainId);
-        
-        // Format dates for the form inputs
+
         let dateBeginText = '';
         let timeBeginText = '00:00';
         let dateEndText = '';
         let timeEndText = '23:59';
-        
+
         if (this.cdoc) {
             const beginAt = this.cdoc.beginAt;
             const endAt = this.cdoc.endAt;
@@ -358,7 +603,7 @@ class CourseEditHandler extends Handler {
             dateEndText = `${endAt.getFullYear()}-${String(endAt.getMonth() + 1).padStart(2, '0')}-${String(endAt.getDate()).padStart(2, '0')}`;
             timeEndText = `${String(endAt.getHours()).padStart(2, '0')}:${String(endAt.getMinutes()).padStart(2, '0')}`;
         }
-        
+
         this.response.template = 'course_edit.html';
         this.response.body = {
             cdoc: this.cdoc,
@@ -407,7 +652,6 @@ class CourseEditHandler extends Handler {
         if (isNaN(endAt.getTime())) throw new ValidationError('endAtDate', 'endAtTime');
         if (beginAt >= endAt) throw new ValidationError('endAtDate', 'endAtTime');
 
-        // Validate problems exist
         if (pids.length) {
             await ProblemModel.getList(domainId, pids, this.user.hasPerm(PERM.PERM_VIEW_PROBLEM_HIDDEN) || this.user._id, true);
         }
@@ -465,7 +709,6 @@ class CourseFilesHandler extends Handler {
 
     @param('cid', Types.ObjectId)
     async get(domainId: string, cid: ObjectId) {
-        // Filter out any files with null/undefined names before sorting
         const validFiles = (this.cdoc.files || []).filter((f) => f && f.name);
         this.response.body = {
             cdoc: this.cdoc,
@@ -486,7 +729,6 @@ class CourseFilesHandler extends Handler {
         }
         const file = this.request.files?.file;
         if (!file) throw new ValidationError('file');
-        // Use original filename if custom filename not provided
         const originalName = file.originalFilename || file.newFilename;
         const actualFilename = filename || originalName;
         if (!actualFilename) throw new ValidationError('filename');
@@ -533,6 +775,95 @@ class CourseFileDownloadHandler extends Handler {
     }
 }
 
+// Course Share Handler
+class CourseShareHandler extends Handler {
+    cdoc: CourseDoc;
+
+    @param('cid', Types.ObjectId)
+    async prepare(domainId: string, cid: ObjectId) {
+        this.cdoc = await CourseModel.get(domainId, cid);
+        if (!this.cdoc) throw new CourseNotFoundError(domainId, cid);
+        const canManage = this.user.own(this.cdoc) || (this.cdoc.teachers || []).includes(this.user._id);
+        if (canManage) this.checkPerm(PERM.PERM_EDIT_HOMEWORK_SELF);
+        else this.checkPerm(PERM.PERM_EDIT_HOMEWORK);
+        if (this.cdoc.reference) throw new ValidationError('reference');
+    }
+
+    @param('cid', Types.ObjectId)
+    async get(domainId: string, cid: ObjectId) {
+        const dudict = await DomainModel.getDictUserByDomainId(this.user._id);
+        const dids = Object.keys(dudict);
+        const allDomains = await DomainModel.getMulti({ _id: { $in: dids } }).toArray();
+        const sharePolicy = this.domain.share as string | undefined;
+        const targets = [];
+
+        for (const d of allDomains) {
+            if (d._id === domainId) continue;
+            const dudoc = await UserModel.getById(d._id, this.user._id);
+            if (!dudoc || !dudoc.hasPerm(PERM.PERM_CREATE_HOMEWORK)) continue;
+            if (this.cdoc.pids?.length && !isTargetAllowed(sharePolicy, d._id)) continue;
+            targets.push(d);
+        }
+
+        const shares = [];
+        for (const ref of this.cdoc.sharedTo || []) {
+            const [ddoc, scdoc] = await Promise.all([
+                DomainModel.get(ref.domainId),
+                CourseModel.get(ref.domainId, ref.docId),
+            ]);
+            if (!ddoc) continue;
+            shares.push({ domain: ddoc, cdoc: scdoc, ref });
+        }
+
+        this.response.template = 'course_share.html';
+        this.response.body = {
+            cdoc: this.cdoc,
+            targets,
+            shares,
+            now: new Date(),
+        };
+    }
+
+    @param('cid', Types.ObjectId)
+    @param('target', Types.Name)
+    async postShare(domainId: string, cid: ObjectId, target: string) {
+        if (this.cdoc.pids?.length && !isTargetAllowed(this.domain.share, target)) {
+            throw new ValidationError('target');
+        }
+        const targetDomain = await DomainModel.get(target);
+        if (!targetDomain) throw new NotFoundError(target);
+        const dudoc = await UserModel.getById(target, this.user._id);
+        if (!dudoc || !dudoc.hasPerm(PERM.PERM_CREATE_HOMEWORK)) throw new PermissionError(PERM.PERM_CREATE_HOMEWORK);
+        const newCid = await CourseModel.share(
+            domainId,
+            cid,
+            target,
+            this.user._id,
+            this.user.hasPerm(PERM.PERM_VIEW_PROBLEM_HIDDEN) || this.user._id,
+        );
+        this.response.redirect = this.url('course_detail', { domainId: target, cid: newCid });
+    }
+
+    @param('cid', Types.ObjectId)
+    @param('target', Types.Name)
+    async postSync(domainId: string, cid: ObjectId, target: string) {
+        await CourseModel.sync(
+            domainId,
+            cid,
+            target,
+            this.user.hasPerm(PERM.PERM_VIEW_PROBLEM_HIDDEN) || this.user._id,
+        );
+        this.response.redirect = this.url('course_share', { cid });
+    }
+
+    @param('cid', Types.ObjectId)
+    @param('target', Types.Name)
+    async postUnshare(domainId: string, cid: ObjectId, target: string) {
+        await CourseModel.unshare(domainId, cid, target);
+        this.response.redirect = this.url('course_share', { cid });
+    }
+}
+
 // Course Scoreboard Handler
 class CourseScoreboardHandler extends Handler {
     @param('cid', Types.ObjectId)
@@ -541,20 +872,15 @@ class CourseScoreboardHandler extends Handler {
         const cdoc = await CourseModel.get(domainId, cid);
         if (!cdoc) throw new CourseNotFoundError(domainId, cid);
 
-        // Check permission for viewing scoreboard
         this.checkPerm(PERM.PERM_VIEW_HOMEWORK_SCOREBOARD);
 
-        // Get all enrolled users
         const cursor = CourseModel.getMultiStatus(domainId, { docId: cid, attend: 1 });
         const [csdocs, cpcount] = await this.paginate(cursor, page, 'scoreboard');
 
         const uids = csdocs.map((csdoc) => csdoc.uid);
         const udict = await UserModel.getListForRender(domainId, uids);
-
-        // Get problems
         const pdict = await ProblemModel.getList(domainId, cdoc.pids, true, true);
 
-        // Calculate scores per user
         const rows: any[] = [];
         for (const csdoc of csdocs) {
             const row: any = {
@@ -571,7 +897,6 @@ class CourseScoreboardHandler extends Handler {
             rows.push(row);
         }
 
-        // Sort by total score
         rows.sort((a, b) => b.totalScore - a.totalScore);
 
         this.response.template = 'course_scoreboard.html';
@@ -593,13 +918,10 @@ class CourseRecordsHandler extends Handler {
         const cdoc = await CourseModel.get(domainId, cid);
         if (!cdoc) throw new CourseNotFoundError(domainId, cid);
 
-        // Get records for problems in this course
         const query: any = {
             pid: { $in: cdoc.pids },
         };
 
-        // Only show own records if user doesn't have permission to view all records
-        // Users who can view scoreboard (teachers/admins) can see all students' records
         if (!this.user.hasPerm(PERM.PERM_VIEW_HOMEWORK_SCOREBOARD)) {
             query.uid = this.user._id;
         }
@@ -607,11 +929,8 @@ class CourseRecordsHandler extends Handler {
         const cursor = RecordModel.getMulti(domainId, query).sort({ _id: -1 });
         const [rdocs, rpcount] = await this.paginate(cursor, page, 'record');
 
-        // Get user info for all records
         const uids = [...new Set(rdocs.map((r) => r.uid))];
         const udict = await UserModel.getListForRender(domainId, uids);
-
-        // Get problem info
         const pdict = await ProblemModel.getList(domainId, cdoc.pids, true, true);
 
         this.response.template = 'course_records.html';
@@ -628,7 +947,6 @@ class CourseRecordsHandler extends Handler {
 
 // Plugin apply function
 export async function apply(ctx: Context) {
-    // Register routes
     ctx.Route('course_main', '/course', CourseMainHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_create', '/course/create', CourseEditHandler);
     ctx.Route('course_detail', '/course/:cid', CourseDetailHandler, PERM.PERM_VIEW_HOMEWORK);
@@ -637,8 +955,8 @@ export async function apply(ctx: Context) {
     ctx.Route('course_file_download', '/course/:cid/file/:filename', CourseFileDownloadHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_scoreboard', '/course/:cid/scoreboard', CourseScoreboardHandler, PERM.PERM_VIEW_HOMEWORK_SCOREBOARD);
     ctx.Route('course_records', '/course/:cid/records', CourseRecordsHandler, PERM.PERM_VIEW_HOMEWORK);
+    ctx.Route('course_share', '/course/:cid/share', CourseShareHandler, PERM.PERM_VIEW_HOMEWORK);
 
-    // Add i18n translations
     ctx.i18n.load('zh', {
         course: '课程',
         course_main: '课程',
@@ -648,6 +966,7 @@ export async function apply(ctx: Context) {
         course_files: '课程文件',
         course_scoreboard: '成绩表',
         course_records: '提交记录',
+        course_share: '分享课程',
         'Create Course': '创建课程',
         'Edit Course': '编辑课程',
         'Course List': '课程列表',
@@ -678,6 +997,23 @@ export async function apply(ctx: Context) {
         'Submitter': '提交者',
         'Submit Time': '提交时间',
         'No records yet.': '暂无提交记录。',
+        'Share Course': '分享课程',
+        'Share to Domain': '分享到域',
+        'Target Domain': '目标域',
+        'Select a domain to share this course to': '选择要分享课程的目标域',
+        'Share': '分享',
+        'Available Domains': '可用域',
+        'No domains available to share to.': '没有可分享的目标域。',
+        'Shared Courses': '已分享的课程',
+        'Sync': '同步',
+        'Revoke': '撤销分享',
+        'Domain': '域',
+        'Actions': '操作',
+        'Ongoing': '进行中',
+        'Ended': '已结束',
+        'Domain share setting hint': '可在当前域的“域设置”中配置允许分享的域(填写 * 表示允许所有域)。',
+        'Shared from domain': '来自域',
+        'Revoke hint': '撤销分享会删除目标域中的课程副本(保留已复制的题目)。',
     });
 
     ctx.i18n.load('en', {
@@ -689,6 +1025,7 @@ export async function apply(ctx: Context) {
         course_files: 'Course Files',
         course_scoreboard: 'Scoreboard',
         course_records: 'Records',
+        course_share: 'Share Course',
         'Create Course': 'Create Course',
         'Edit Course': 'Edit Course',
         'Course List': 'Course List',
@@ -719,8 +1056,24 @@ export async function apply(ctx: Context) {
         'Submitter': 'Submitter',
         'Submit Time': 'Submit Time',
         'No records yet.': 'No records yet.',
+        'Share Course': 'Share Course',
+        'Share to Domain': 'Share to Domain',
+        'Target Domain': 'Target Domain',
+        'Select a domain to share this course to': 'Select a domain to share this course to',
+        'Share': 'Share',
+        'Available Domains': 'Available Domains',
+        'No domains available to share to.': 'No domains available to share to.',
+        'Shared Courses': 'Shared Courses',
+        'Sync': 'Sync',
+        'Revoke': 'Revoke',
+        'Domain': 'Domain',
+        'Actions': 'Actions',
+        'Ongoing': 'Ongoing',
+        'Ended': 'Ended',
+        'Domain share setting hint': 'Configure allowed target domains in the "Share problem with domain" domain setting of the source domain (use * to allow all domains).',
+        'Shared from domain': 'Shared from domain',
+        'Revoke hint': 'Revoking deletes the course copy in the target domain (copied problems are kept).',
     });
 
-    // Register model globally
     (global as any).Hydro.model.course = CourseModel;
 }

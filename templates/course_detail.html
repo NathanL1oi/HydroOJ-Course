@@ -2,6 +2,17 @@
 {% block content %}
 <div class="row">
   <div class="medium-9 columns">
+    {% if source %}
+    <div class="section">
+      <div class="section__body typo">
+        <p class="note">
+          <span class="icon icon-link"></span>
+          {{ _('Shared from domain') }} <strong>{{ source.ddoc.name or source.ddoc._id }}</strong>:
+          <a href="{{ url('course_detail', domainId=source.ddoc._id, cid=source.cdoc.docId) }}">{{ source.cdoc.title }}</a>
+        </p>
+      </div>
+    </div>
+    {% endif %}
     <div class="section">
       <div class="section__header">
         <h1 class="section__title">{{ cdoc.title }}</h1>
@@ -12,6 +23,11 @@
           </a>
           <a href="{{ url('course_files', cid=cdoc.docId) }}" class="tool-button" data-tooltip="{{ _('Manage Files') }}">
             <span class="icon icon-file"></span>
+          </a>
+          {% endif %}
+          {% if canShare %}
+          <a href="{{ url('course_share', cid=cdoc.docId) }}" class="tool-button" data-tooltip="{{ _('Share Course') }}">
+            <span class="icon icon-share"></span>
           </a>
           {% endif %}
           <a href="{{ url('course_scoreboard', cid=cdoc.docId) }}" class="tool-button" data-tooltip="{{ _('Scoreboard') }}">
@@ -170,6 +186,14 @@
               {{ _('Scoreboard') }}
             </a>
           </li>
+          {% if canShare %}
+          <li class="menu__item">
+            <a href="{{ url('course_share', cid=cdoc.docId) }}">
+              <span class="icon icon-share"></span>
+              {{ _('Share Course') }}
+            </a>
+          </li>
+          {% endif %}
         </ul>
       </div>
     </div>
