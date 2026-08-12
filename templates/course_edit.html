@@ -94,8 +94,10 @@
         <hr>
         <h2>{{ _('Danger Zone') }}</h2>
         {% if canShare %}
-        <div style="margin-bottom: 12px;">
-          <a href="{{ url('course_share', cid=cdoc.docId) }}" class="rounded button">{{ _('Share to Domain') }}</a>
+        <div class="row">
+          <div class="columns">
+            <a href="{{ url('course_share', cid=cdoc.docId) }}" class="rounded button">{{ _('Share to Domain') }}</a>
+          </div>
         </div>
         {% endif %}
         <form method="post" onsubmit="return confirm('{{ _('Are you sure you want to delete this course?') }}');">
