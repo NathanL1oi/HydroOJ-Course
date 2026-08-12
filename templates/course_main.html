@@ -5,7 +5,7 @@
     <div class="section">
       <div class="section__header">
         <h1 class="section__title">{{ _('Course List') }}</h1>
-        {% if handler.user.hasPerm(PERM.PERM_CREATE_HOMEWORK) %}
+        {% if handler.user.hasPerm(perm.PERM_CREATE_HOMEWORK) %}
         <a href="{{ url('course_create') }}" class="primary rounded button">{{ _('Create Course') }}</a>
         {% endif %}
       </div>
