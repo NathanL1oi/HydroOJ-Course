@@ -267,7 +267,9 @@ export const CourseModel = {
     async get(domainId: string, cid: ObjectId): Promise<CourseDoc | null> {
         const doc = await DocumentModel.get(domainId, TYPE_COURSE, cid);
         if (!doc) return null;
-        return doc as unknown as CourseDoc;
+        const cdoc = doc as unknown as CourseDoc;
+        if (cdoc.chapters?.length) cdoc.pids = flattenCoursePids(cdoc.chapters);
+        return cdoc;
     },
 
     getMulti(domainId: string, query: Filter<CourseDoc> = {}) {
@@ -584,14 +586,18 @@ class CourseDetailHandler extends Handler {
         }
         const enrolledUdict = await UserModel.getListForRender(domainId, enrolledUsers);
 
-        // Get problems
-        const pdict = await ProblemModel.getList(domainId, this.cdoc.pids, true, true);
+        // Get problems. New courses store nested chapters, while the flat
+        // `pids` field is kept in sync. Fall back to it for legacy data.
+        const coursePids = flattenCoursePids(this.cdoc.chapters).length
+            ? flattenCoursePids(this.cdoc.chapters)
+            : this.cdoc.pids;
+        const pdict = await ProblemModel.getList(domainId, coursePids, true, true);
 
         // Get problem status for current user
         let psdict = {};
         let rdict = {};
         if (csdoc) {
-            const valid = (csdoc.journal || []).filter((p) => this.cdoc.pids.includes(p.pid));
+            const valid = (csdoc.journal || []).filter((p) => coursePids.includes(p.pid));
             for (const pdetail of valid) {
                 psdict[pdetail.pid] = pdetail;
                 rdict[pdetail.rid.toString()] = { _id: pdetail.rid };
@@ -756,7 +762,7 @@ class CourseEditHandler extends Handler {
                 teachers,
                 assign,
                 classes,
-                ...(chapters.length ? { chapters } : {}),
+                ...(_chapters ? { chapters } : {}),
             });
         } else {
             await CourseModel.edit(domainId, cid, {
@@ -769,7 +775,7 @@ class CourseEditHandler extends Handler {
                 teachers,
                 assign,
                 classes,
-                ...(chapters.length ? { chapters } : {}),
+                ...(_chapters ? { chapters } : {}),
             });
         }
 
@@ -1126,6 +1132,13 @@ export async function apply(ctx: Context) {
         'Domain share setting hint': '可在当前域的“域设置”中配置允许分享的域(填写 * 表示允许所有域)。',
         'Shared from domain': '来自域',
         'Revoke hint': '撤销分享会删除目标域中的课程副本(保留已复制的题目)。',
+        'Chapters': '章节',
+        'Course Content': '课程内容',
+        'problems': '道题',
+        'subchapters': '个子章节',
+        'No problems in this chapter.': '本章节暂无题目。',
+        'Problems': '题目',
+        'Add chapters and nested subchapters. Each chapter can contain problems or child chapters.': '可添加章节及嵌套子章节，每个章节可包含题目或子章节。',
     });
 
     ctx.i18n.load('en', {
@@ -1187,6 +1200,13 @@ export async function apply(ctx: Context) {
         'Domain share setting hint': 'Configure allowed target domains in the "Share problem with domain" domain setting of the source domain (use * to allow all domains).',
         'Shared from domain': 'Shared from domain',
         'Revoke hint': 'Revoking deletes the course copy in the target domain (copied problems are kept).',
+        'Chapters': 'Chapters',
+        'Course Content': 'Course Content',
+        'problems': 'problems',
+        'subchapters': 'subchapters',
+        'No problems in this chapter.': 'No problems in this chapter.',
+        'Problems': 'Problems',
+        'Add chapters and nested subchapters. Each chapter can contain problems or child chapters.': 'Add chapters and nested subchapters. Each chapter can contain problems or child chapters.',
     });
 
     // Register model globally

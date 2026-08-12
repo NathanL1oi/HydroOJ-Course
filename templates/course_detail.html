@@ -1,5 +1,107 @@
 {% extends "layout/basic.html" %}
 {% block content %}
+<style>
+  .course-chapters {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .course-chapter-details {
+    border: 1px solid #e3e8ef;
+    border-radius: 12px;
+    background: #ffffff;
+    overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  }
+  .course-chapter-details > summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+    cursor: pointer;
+    list-style: none;
+    font-weight: 600;
+  }
+  .course-chapter-details > summary::-webkit-details-marker {
+    display: none;
+  }
+  .course-chapter-details > summary::before {
+    content: '▸';
+    color: #667085;
+    transition: transform 160ms ease;
+  }
+  .course-chapter-details[open] > summary::before {
+    transform: rotate(90deg);
+  }
+  .course-chapter-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
+    height: 28px;
+    padding: 0 8px;
+    border-radius: 999px;
+    background: #eef4ff;
+    color: #2f5bcd;
+    font-size: 12px;
+  }
+  .course-chapter-title {
+    flex: 1;
+    margin: 0;
+  }
+  .course-chapter-meta {
+    color: #667085;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .course-chapter-content {
+    padding: 0 16px 14px 48px;
+    color: #475467;
+  }
+  .course-chapter-children {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 0 12px 12px 20px;
+    padding-left: 18px;
+    border-left: 2px solid #e3e8ef;
+  }
+  .course-problem-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .course-problem-item {
+    display: grid;
+    grid-template-columns: 32px minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid #edf0f4;
+    border-radius: 10px;
+    background: #fafbfc;
+    color: inherit;
+    text-decoration: none;
+  }
+  .course-problem-item:hover {
+    border-color: #cbd5e1;
+    background: #ffffff;
+  }
+  .course-problem-index {
+    color: #98a2b3;
+    font-size: 12px;
+  }
+  .course-problem-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .course-problem-score {
+    color: #667085;
+    font-weight: 600;
+  }
+</style>
 <div class="row">
   <div class="medium-9 columns">
     {% if source %}
@@ -60,56 +162,77 @@
           {{ cdoc.content|markdown|safe }}
         </div>
         
-        {% if pdict|length > 0 %}
-        <h2>{{ _('Problem List') }}</h2>
-        <table class="data-table">
-          <colgroup>
-            <col class="col--index" style="width: 50px;">
-            <col class="col--problem">
-            <col class="col--status">
-            <col class="col--score">
-          </colgroup>
-          <thead>
-            <tr>
-              <th class="col--index">#</th>
-              <th class="col--problem">{{ _('Problem') }}</th>
-              <th class="col--status">{{ _('Status') }}</th>
-              <th class="col--score">{{ _('Score') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for pid in cdoc.pids %}
-            {% set pdoc = pdict[pid] %}
-            <tr>
-              <td class="col--index">{{ loop.index }}</td>
-              <td class="col--problem">
-                {% if pdoc %}
-                <a href="{{ url('problem_detail', pid=pdoc.docId) }}">{{ pdoc.title }}</a>
-                {% else %}
-                <span class="text-muted">{{ _('Problem not found') }}</span>
-                {% endif %}
-              </td>
-              <td class="col--status">
-                {% if psdict[pid] %}
-                {% set status = psdict[pid].status %}
-                <span class="record-status--text {% if status == 1 %}pass{% elif status > 1 %}fail{% endif %}">
-                  {% if STATUS_SHORT_TEXTS[status] %}{{ STATUS_SHORT_TEXTS[status] }}{% else %}{{ _('Not Submitted') }}{% endif %}
+        {% if (cdoc.chapters and cdoc.chapters|length > 0) or pdict|length > 0 %}
+        <h2>{{ _('Course Content') }}</h2>
+        {% macro render_chapter(chapter, depth) %}
+        <details class="course-chapter-details"{% if depth < 1 %} open{% endif %}>
+          <summary>
+            <span class="course-chapter-badge">{{ chapter._id }}</span>
+            <span class="course-chapter-title">{{ chapter.title }}</span>
+            {% set chapter_pids = chapter.pids or [] %}
+            <span class="course-chapter-meta">
+              {{ chapter_pids|length }} {{ _('problems') }}
+              {% if chapter.children and chapter.children|length %}
+              · {{ chapter.children|length }} {{ _('subchapters') }}
+              {% endif %}
+            </span>
+          </summary>
+          <div class="course-chapter-content">
+            {% if chapter.content %}
+            <div class="course-chapter-description">{{ chapter.content|markdown|safe }}</div>
+            {% endif %}
+            {% if chapter_pids|length > 0 %}
+            <div class="course-problem-list">
+              {% for pid in chapter_pids %}
+              {% set pdoc = pdict[pid] %}
+              <a class="course-problem-item" href="{{ url('problem_detail', pid=pdoc.docId) if pdoc else '#' }}">
+                <span class="course-problem-index">{{ loop.index }}</span>
+                <span class="course-problem-title">
+                  {% if pdoc %}
+                  {{ pdoc.title }}
+                  {% else %}
+                  <span class="text-muted">{{ _('Problem not found') }}</span>
+                  {% endif %}
                 </span>
-                {% else %}
-                <span class="text-muted">{{ _('Not Submitted') }}</span>
-                {% endif %}
-              </td>
-              <td class="col--score">
-                {% if psdict[pid] %}
-                {{ psdict[pid].score or 0 }}
-                {% else %}
-                -
-                {% endif %}
-              </td>
-            </tr>
+                <span class="record-status--text {% if psdict[pid] and psdict[pid].status == 1 %}pass{% elif psdict[pid] and psdict[pid].status > 1 %}fail{% endif %}">
+                  {% if psdict[pid] and STATUS_SHORT_TEXTS[psdict[pid].status] %}
+                  {{ STATUS_SHORT_TEXTS[psdict[pid].status] }}
+                  {% else %}
+                  {{ _('Not Submitted') }}
+                  {% endif %}
+                </span>
+                <span class="course-problem-score">
+                  {{ psdict[pid].score or 0 if psdict[pid] else '-' }}
+                </span>
+              </a>
+              {% endfor %}
+            </div>
+            {% else %}
+            <p class="text-muted">{{ _('No problems in this chapter.') }}</p>
+            {% endif %}
+          </div>
+          {% if chapter.children and chapter.children|length %}
+          <div class="course-chapter-children">
+            {% for child in chapter.children %}
+            {{ render_chapter(child, depth + 1) }}
             {% endfor %}
-          </tbody>
-        </table>
+          </div>
+          {% endif %}
+        </details>
+        {% endmacro %}
+
+        {% if cdoc.chapters and cdoc.chapters|length > 0 %}
+        <div class="course-chapters">
+          {% for chapter in cdoc.chapters %}
+          {{ render_chapter(chapter, 0) }}
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="course-chapters">
+          {% set legacy_chapter = { _id: 1, title: _('Problems'), pids: cdoc.pids } %}
+          {{ render_chapter(legacy_chapter, 0) }}
+        </div>
+        {% endif %}
         {% endif %}
         
         {% if files|length > 0 %}
