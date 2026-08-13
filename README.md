@@ -5,7 +5,7 @@ Course plugin for HydroOJ v5 - Enhanced training + homework functionality for cl
 ## Features
 
 - **Create Courses**: Create courses with an introduction, nested chapters, problems, and file attachments
-- **Nested Chapters**: Organize problems into chapters and nested subchapters
+- **Nested Chapters**: Organize problems into chapters and nested subchapters, each with its own page
 - **Multiple Classes**: Support for multiple classes/groups per course
 - **Multiple Teachers**: Assign multiple teachers to a course
 - **Student Progress Tracking**: Track individual student progress through the course

@@ -1,0 +1,130 @@
+{% extends "layout/basic.html" %}
+{% block content %}
+<div class="row">
+  <div class="medium-9 columns">
+    <div class="section">
+      <div class="section__header">
+        <h1 class="section__title">
+          <a href="{{ url('course_detail', cid=cdoc.docId) }}">{{ cdoc.title }}</a>
+          {% for node in chapterPath %}
+          <span class="text-muted">/</span>
+          {% if loop.last %}
+          {{ node.title }}
+          {% else %}
+          <a href="{{ url('course_chapter', cid=cdoc.docId, chapterId=node._id) }}">{{ node.title }}</a>
+          {% endif %}
+          {% endfor %}
+        </h1>
+        <div class="section__tools">
+          <a href="{{ url('course_detail', cid=cdoc.docId) }}" class="tool-button" data-tooltip="{{ _('Back to Course') }}">
+            <span class="icon icon-back"></span>
+          </a>
+        </div>
+      </div>
+      <div class="section__body typo">
+        {% if chapter.content %}
+        <div class="course-chapter-content">
+          {{ chapter.content|markdown|safe }}
+        </div>
+        {% endif %}
+
+        {% if chapterPids|length > 0 %}
+        <h2>{{ _('Problems') }}</h2>
+        <table class="data-table">
+          <colgroup>
+            <col class="col--index" style="width: 50px;">
+            <col class="col--problem">
+            <col class="col--status">
+            <col class="col--score">
+          </colgroup>
+          <thead>
+            <tr>
+              <th class="col--index">#</th>
+              <th class="col--problem">{{ _('Problem') }}</th>
+              <th class="col--status">{{ _('Status') }}</th>
+              <th class="col--score">{{ _('Score') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for pid in chapterPids %}
+            {% set pdoc = pdict[pid] %}
+            <tr>
+              <td class="col--index">{{ loop.index }}</td>
+              <td class="col--problem">
+                {% if pdoc %}
+                <a href="{{ url('problem_detail', pid=pdoc.docId) }}">{{ pdoc.title }}</a>
+                {% else %}
+                <span class="text-muted">{{ _('Problem not found') }}</span>
+                {% endif %}
+              </td>
+              <td class="col--status">
+                {% if psdict[pid] and model.builtin.STATUS_SHORT_TEXTS[psdict[pid].status] %}
+                <span class="record-status--text {% if psdict[pid].status == 1 %}pass{% elif psdict[pid].status > 1 %}fail{% endif %}">
+                  {{ model.builtin.STATUS_SHORT_TEXTS[psdict[pid].status] }}
+                </span>
+                {% else %}
+                <span class="text-muted">{{ _('Not Submitted') }}</span>
+                {% endif %}
+              </td>
+              <td class="col--score">
+                {% if psdict[pid] %}
+                {{ psdict[pid].score or 0 }}
+                {% else %}
+                -
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+
+        {% if chapter.children and chapter.children|length > 0 %}
+        <h2>{{ _('Subchapters') }}</h2>
+        <ul class="menu">
+          {% for child in chapter.children %}
+          <li class="menu__item">
+            <a href="{{ url('course_chapter', cid=cdoc.docId, chapterId=child._id) }}">
+              <span class="icon icon-folder"></span>
+              {{ child.title }}
+              <span class="text-muted">({{ (child.pids or [])|length }} {{ _('problems') }})</span>
+            </a>
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="medium-3 columns">
+    <div class="section side">
+      <div class="section__header">
+        <h1 class="section__title">{{ _('Quick Links') }}</h1>
+      </div>
+      <div class="section__body">
+        <ul class="menu">
+          <li class="menu__item">
+            <a href="{{ url('course_detail', cid=cdoc.docId) }}">
+              <span class="icon icon-back"></span>
+              {{ _('Back to Course') }}
+            </a>
+          </li>
+          <li class="menu__item">
+            <a href="{{ url('course_records', cid=cdoc.docId) }}">
+              <span class="icon icon-flag"></span>
+              {{ _('Records') }}
+            </a>
+          </li>
+          <li class="menu__item">
+            <a href="{{ url('course_scoreboard', cid=cdoc.docId) }}">
+              <span class="icon icon-statistics"></span>
+              {{ _('Scoreboard') }}
+            </a>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

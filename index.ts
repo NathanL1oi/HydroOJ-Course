@@ -133,6 +133,21 @@ function courseChaptersForEditor(cdoc: CourseDoc | null): CourseChapter[] {
     return [];
 }
 
+// Locate a chapter by its globally-unique `_id` inside the nested chapter tree
+// and return the path from the root chapter down to (and including) it.
+function findChapterPath(chapters: CourseChapter[], targetId: number): CourseChapter[] | null {
+    const visit = (nodes: CourseChapter[], path: CourseChapter[]): CourseChapter[] | null => {
+        for (const node of nodes) {
+            const nextPath = [...path, node];
+            if (node._id === targetId) return nextPath;
+            const found = visit(node.children || [], nextPath);
+            if (found) return found;
+        }
+        return null;
+    };
+    return visit(chapters, []);
+}
+
 // Resolve raw problem identifiers to numeric doc ids. Numeric strings are
 // treated as doc ids (matching HydroOJ's own problem URL handling); anything
 // else is treated as a problem pid string such as "P1001".
@@ -675,6 +690,56 @@ class CourseDetailHandler extends Handler {
     }
 }
 
+// Course Chapter Handler
+class CourseChapterHandler extends Handler {
+    cdoc: CourseDoc;
+    chapterPath: CourseChapter[];
+
+    @param('cid', Types.ObjectId)
+    @param('chapterId', Types.PositiveInt)
+    async prepare(domainId: string, cid: ObjectId, chapterId: number) {
+        this.cdoc = await CourseModel.get(domainId, cid);
+        if (!this.cdoc) throw new CourseNotFoundError(domainId, cid);
+
+        if (this.cdoc.assign?.length && !this.user.own(this.cdoc) && !this.user.hasPerm(PERM.PERM_VIEW_HIDDEN_HOMEWORK)) {
+            const groups = (await UserModel.listGroup(domainId, this.user._id)).map((g) => g.name);
+            const hasAccess = this.cdoc.assign.some((a) => groups.includes(a))
+                || (this.cdoc.classes || []).some((c) => groups.includes(c))
+                || (this.cdoc.teachers || []).includes(this.user._id);
+            if (!hasAccess) throw new NotFoundError('Course', cid.toString());
+        }
+
+        const chapterPath = findChapterPath(this.cdoc.chapters || [], chapterId);
+        if (!chapterPath) throw new NotFoundError('Chapter', String(chapterId));
+        this.chapterPath = chapterPath;
+    }
+
+    @param('cid', Types.ObjectId)
+    @param('chapterId', Types.PositiveInt)
+    async get(domainId: string, cid: ObjectId, chapterId: number) {
+        const chapter = this.chapterPath[this.chapterPath.length - 1];
+        const chapterPids = (chapter.pids || []).map((pid) => Number(pid)).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+        const pdict = await ProblemModel.getList(domainId, chapterPids, true, true);
+
+        const csdoc = await CourseModel.getStatus(domainId, cid, this.user._id);
+        const psdict = {};
+        if (csdoc) {
+            const valid = (csdoc.journal || []).filter((p) => chapterPids.includes(p.pid));
+            for (const pdetail of valid) psdict[pdetail.pid] = pdetail;
+        }
+
+        this.response.template = 'course_chapter.html';
+        this.response.body = {
+            cdoc: this.cdoc,
+            chapter,
+            chapterPath: this.chapterPath,
+            chapterPids,
+            pdict,
+            psdict,
+        };
+    }
+}
+
 // Course Edit Handler
 class CourseEditHandler extends Handler {
     cdoc: CourseDoc | null;
@@ -1033,6 +1098,7 @@ export async function apply(ctx: Context) {
     ctx.Route('course_main', '/course', CourseMainHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_create', '/course/create', CourseEditHandler);
     ctx.Route('course_detail', '/course/:cid', CourseDetailHandler, PERM.PERM_VIEW_HOMEWORK);
+    ctx.Route('course_chapter', '/course/:cid/chapter/:chapterId', CourseChapterHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_edit', '/course/:cid/edit', CourseEditHandler);
     ctx.Route('course_files', '/course/:cid/file', CourseFilesHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_file_download', '/course/:cid/file/:filename', CourseFileDownloadHandler, PERM.PERM_VIEW_HOMEWORK);
@@ -1074,7 +1140,9 @@ export async function apply(ctx: Context) {
         'Course Content': '课程内容',
         'problems': '道题',
         'subchapters': '个子章节',
+        'Subchapters': '子章节',
         'Problems': '题目',
+        'Back to Course': '返回课程',
         'No problems in this chapter.': '本章节暂无题目。',
         'No courses found.': '暂无课程。',
         'enrolled': '已加入',
@@ -1142,7 +1210,9 @@ export async function apply(ctx: Context) {
         'Course Content': 'Course Content',
         'problems': 'problems',
         'subchapters': 'subchapters',
+        'Subchapters': 'Subchapters',
         'Problems': 'Problems',
+        'Back to Course': 'Back to Course',
         'No problems in this chapter.': 'No problems in this chapter.',
         'No courses found.': 'No courses found.',
         'enrolled': 'enrolled',
