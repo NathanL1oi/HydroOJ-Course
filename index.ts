@@ -704,15 +704,22 @@ class CourseDetailHandler extends Handler {
         }
 
         const chapterProgress: Record<number, { done: number; total: number }> = {};
-        const computeChapterProgress = (chapters: CourseChapter[]) => {
+        const computeChapterProgress = (chapters: CourseChapter[]): { done: number; total: number } => {
+            let total = 0;
+            let done = 0;
             for (const chapter of chapters) {
                 const pids = (chapter.pids || []).map((pid) => Number(pid)).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+                const ownTotal = pids.length;
+                const ownDone = pids.filter((pid) => psdict[pid] && psdict[pid].status === 1).length;
+                const children = computeChapterProgress(chapter.children || []);
                 chapterProgress[chapter._id] = {
-                    total: pids.length,
-                    done: pids.filter((pid) => psdict[pid] && psdict[pid].status === 1).length,
+                    total: ownTotal + children.total,
+                    done: ownDone + children.done,
                 };
-                computeChapterProgress(chapter.children || []);
+                total += ownTotal + children.total;
+                done += ownDone + children.done;
             }
+            return { total, done };
         };
         computeChapterProgress(this.cdoc.chapters || []);
 
