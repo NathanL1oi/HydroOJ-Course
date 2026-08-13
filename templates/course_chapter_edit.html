@@ -28,6 +28,31 @@
     padding: 2px 8px;
     line-height: 1.4;
   }
+  .course-problem-suggest {
+    position: absolute;
+    z-index: 10;
+    left: 15px;
+    right: 15px;
+    max-height: 320px;
+    overflow-y: auto;
+    border: 1px solid #e3e8ef;
+    border-radius: 8px;
+    background: #ffffff;
+    box-shadow: 0 8px 20px rgba(16, 24, 40, 0.12);
+  }
+  .course-problem-suggest-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: 0;
+    background: transparent;
+    padding: 8px 12px;
+    cursor: pointer;
+  }
+  .course-problem-suggest-item:hover,
+  .course-problem-suggest-item.active {
+    background: #f5f7fa;
+  }
 </style>
 <div class="row">
   <div class="medium-9 columns">
@@ -65,8 +90,9 @@
               <label>{{ _('Problems') }}</label>
               <div id="course-chapter-problems" class="course-problem-editor"></div>
               <div class="row">
-                <div class="columns medium-8">
-                  <input type="text" id="course-problem-add-input" class="textbox" placeholder="1001, 1002, P1003">
+                <div class="columns medium-8" style="position: relative;">
+                  <input type="text" id="course-problem-add-input" class="textbox" placeholder="{{ _('Search problems...') }}" autocomplete="off">
+                  <div id="course-problem-suggest" class="course-problem-suggest" style="display: none;"></div>
                 </div>
                 <div class="columns medium-4">
                   <button type="button" id="course-problem-add" class="rounded primary button">{{ _('Add') }}</button>
@@ -156,6 +182,8 @@
   const pidsInput = document.getElementById('course-pids');
   const addInput = document.getElementById('course-problem-add-input');
   const addBtn = document.getElementById('course-problem-add');
+  const suggest = document.getElementById('course-problem-suggest');
+  const searchUrl = {{ url('course_problem_search')|json|safe }};
   if (!root || !pidsInput) return;
 
   let problems = [];
@@ -164,7 +192,27 @@
   } catch (e) {
     problems = [];
   }
-  problems = problems.map((p) => ({ id: String(p.id), title: String(p.title || p.id) }));
+  problems = problems.map((p) => ({
+    id: String(p.id),
+    pid: String(p.pid || ''),
+    title: String(p.title || p.id),
+    nSubmit: Number(p.nSubmit || 0),
+    nAccept: Number(p.nAccept || 0),
+    difficulty: Number(p.difficulty || 0),
+    tag: Array.isArray(p.tag) ? p.tag : [],
+    hidden: !!p.hidden,
+  }));
+
+  const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  const problemInfoHtml = (p) => {
+    const pid = p.pid ? `<b>${escapeHtml(p.pid)}</b> · ` : '';
+    const title = escapeHtml(p.title || p.id);
+    const stats = `${p.nAccept || 0} / ${p.nSubmit || 0}`;
+    const diff = p.difficulty ? ` · ${p.difficulty}` : '';
+    const hidden = p.hidden ? ' <span class="text-orange">(' + {{ _('Hidden')|json|safe }} + ')</span>' : '';
+    return `${pid}${title} <span class="text-muted">(${stats}${diff})</span>${hidden}`;
+  };
 
   const sync = () => {
     pidsInput.value = problems.map((p) => p.id).join(',');
@@ -187,10 +235,10 @@
 
       const title = document.createElement('span');
       title.className = 'course-problem-title';
-      title.textContent = `${index + 1}. ${p.title}`;
+      title.innerHTML = `${index + 1}. ${problemInfoHtml(p)}`;
       row.appendChild(title);
 
-      const up = makeButton('↑', '{{ _('Move up') }}');
+      const up = makeButton('↑', {{ _('Move up')|json|safe }});
       up.disabled = index === 0;
       up.addEventListener('click', () => {
         [problems[index - 1], problems[index]] = [problems[index], problems[index - 1]];
@@ -198,7 +246,7 @@
       });
       row.appendChild(up);
 
-      const down = makeButton('↓', '{{ _('Move down') }}');
+      const down = makeButton('↓', {{ _('Move down')|json|safe }});
       down.disabled = index === problems.length - 1;
       down.addEventListener('click', () => {
         [problems[index + 1], problems[index]] = [problems[index], problems[index + 1]];
@@ -206,7 +254,7 @@
       });
       row.appendChild(down);
 
-      const remove = makeButton('✕', '{{ _('Remove') }}');
+      const remove = makeButton('✕', {{ _('Remove')|json|safe }});
       remove.addEventListener('click', () => {
         problems.splice(index, 1);
         render();
@@ -218,23 +266,84 @@
     sync();
   };
 
-  const addProblem = () => {
-    const raw = (addInput.value || '').trim();
-    if (!raw) return;
-    const ids = raw.replace(/，/g, ',').split(',').map((s) => s.trim()).filter((s) => s);
-    ids.forEach((id) => {
-      if (!problems.some((p) => p.id === id)) problems.push({ id, title: id });
+  const addProblem = (p) => {
+    if (!p || problems.some((item) => item.id === String(p.docId))) return;
+    problems.push({
+      id: String(p.docId),
+      pid: String(p.pid || ''),
+      title: String(p.title || p.docId),
+      nSubmit: Number(p.nSubmit || 0),
+      nAccept: Number(p.nAccept || 0),
+      difficulty: Number(p.difficulty || 0),
+      tag: Array.isArray(p.tag) ? p.tag : [],
+      hidden: !!p.hidden,
     });
     addInput.value = '';
+    if (suggest) suggest.style.display = 'none';
     render();
   };
 
-  if (addBtn) addBtn.addEventListener('click', addProblem);
+  let suggestTimer = null;
+  const renderSuggestions = (list) => {
+    if (!suggest) return;
+    suggest.innerHTML = '';
+    const candidates = (list || []).filter((p) => !problems.some((item) => item.id === String(p.docId)));
+    if (!candidates.length) {
+      suggest.style.display = 'none';
+      return;
+    }
+    candidates.forEach((p) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'course-problem-suggest-item';
+      btn.innerHTML = problemInfoHtml(p);
+      btn.addEventListener('click', () => addProblem(p));
+      suggest.appendChild(btn);
+    });
+    suggest.style.display = 'block';
+  };
+
+  const fetchSuggestions = () => {
+    if (!suggest) return;
+    const q = (addInput.value || '').trim();
+    if (!q) {
+      suggest.style.display = 'none';
+      return;
+    }
+    clearTimeout(suggestTimer);
+    suggestTimer = setTimeout(async () => {
+      try {
+        const res = await fetch(`${searchUrl}?q=${encodeURIComponent(q)}`, { headers: { Accept: 'application/json' } });
+        const data = await res.json();
+        renderSuggestions(Array.isArray(data) ? data : []);
+      } catch (e) {
+        suggest.style.display = 'none';
+      }
+    }, 250);
+  };
+
+  if (addBtn) addBtn.addEventListener('click', () => {
+    const q = (addInput.value || '').trim();
+    if (!q) return;
+    if (suggest && suggest.style.display === 'block') {
+      const first = suggest.querySelector('.course-problem-suggest-item');
+      if (first) first.click();
+      return;
+    }
+    addProblem({ docId: q, pid: '', title: q, nSubmit: 0, nAccept: 0, difficulty: 0, tag: [], hidden: false });
+  });
+  if (addInput) addInput.addEventListener('input', fetchSuggestions);
   if (addInput) addInput.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') {
       ev.preventDefault();
-      addProblem();
+      if (suggest && suggest.style.display === 'block') {
+        const first = suggest.querySelector('.course-problem-suggest-item');
+        if (first) first.click();
+      }
     }
+  });
+  if (addInput) addInput.addEventListener('blur', () => {
+    setTimeout(() => { if (suggest) suggest.style.display = 'none'; }, 150);
   });
 
   render();

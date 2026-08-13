@@ -844,7 +844,19 @@ class CourseChapterEditHandler extends Handler {
         const chapter = this.chapterPath[this.chapterPath.length - 1];
         const chapterPids = (chapter.pids || []).map((pid) => Number(pid)).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
         const pdict = await ProblemModel.getList(domainId, chapterPids, true, false);
-        const problems = chapterPids.map((pid) => ({ id: pid, title: pdict[pid]?.title || String(pid) }));
+        const problems = chapterPids.map((pid) => {
+            const pdoc = pdict[pid];
+            return {
+                id: pid,
+                pid: pdoc?.pid || '',
+                title: pdoc?.title || String(pid),
+                nSubmit: pdoc?.nSubmit || 0,
+                nAccept: pdoc?.nAccept || 0,
+                difficulty: pdoc?.difficulty || 0,
+                tag: pdoc?.tag || [],
+                hidden: !!pdoc?.hidden,
+            };
+        });
         this.response.template = 'course_chapter_edit.html';
         this.response.body = {
             cdoc: this.cdoc,
@@ -1268,10 +1280,51 @@ class CourseRecordsHandler extends Handler {
     }
 }
 
+// Problem quick-search endpoint used by the chapter editor autocomplete.
+class CourseProblemSearchHandler extends Handler {
+    @param('q', Types.Content, true)
+    async get(domainId: string, q = '') {
+        const qq = (q || '').trim();
+        if (!qq) {
+            this.response.body = [];
+            return;
+        }
+        const escaped = escapeRegExp(qq.toLowerCase());
+        const regex = new RegExp(qq.length >= 2 ? escaped : `^${escaped}`, 'i');
+        const query: Filter<any> = {
+            $or: [
+                { pid: regex },
+                { title: regex },
+                ...(qq.length >= 2 ? [{ tag: qq }] : []),
+            ],
+        };
+        const projection = ['docId', 'pid', 'title', 'nSubmit', 'nAccept', 'difficulty', 'tag', 'hidden', 'owner'];
+        let pdocs = await ProblemModel.getMulti(domainId, query, projection as any).limit(20).toArray();
+        const numeric = Number.isSafeInteger(+qq) ? +qq : null;
+        if (numeric) {
+            const exact = await ProblemModel.get(domainId, numeric, projection as any, true);
+            if (exact && !pdocs.some((p) => p.docId === exact.docId)) pdocs.unshift(exact);
+        }
+        const canViewHidden = this.user.hasPerm(PERM.PERM_VIEW_PROBLEM_HIDDEN);
+        pdocs = pdocs.filter((p) => canViewHidden || p.owner === this.user._id || !p.hidden);
+        this.response.body = pdocs.map((p) => ({
+            docId: p.docId,
+            pid: p.pid || '',
+            title: p.title || '*',
+            nSubmit: p.nSubmit || 0,
+            nAccept: p.nAccept || 0,
+            difficulty: p.difficulty || 0,
+            tag: p.tag || [],
+            hidden: !!p.hidden,
+        }));
+    }
+}
+
 // Plugin apply function
 export async function apply(ctx: Context) {
     ctx.Route('course_main', '/course', CourseMainHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_create', '/course/create', CourseEditHandler);
+    ctx.Route('course_problem_search', '/course/problem-search', CourseProblemSearchHandler, PERM.PERM_VIEW_PROBLEM);
     ctx.Route('course_detail', '/course/:cid', CourseDetailHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_chapter', '/course/:cid/chapter/:chapterId', CourseChapterHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_chapter_edit', '/course/:cid/chapter/:chapterId/edit', CourseChapterEditHandler);
