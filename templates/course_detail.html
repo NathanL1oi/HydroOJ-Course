@@ -116,7 +116,7 @@
           {% endif %}
           {% if canShare %}
           <a href="{{ url('course_share', cid=cdoc.docId) }}" class="tool-button" data-tooltip="{{ _('Share Course') }}">
-            <span class="icon icon-share"></span>
+            <span class="icon">📎</span>
           </a>
           {% endif %}
           <a href="{{ url('course_scoreboard', cid=cdoc.docId) }}" class="tool-button" data-tooltip="{{ _('Scoreboard') }}">
@@ -318,7 +318,7 @@
           {% if canShare %}
           <li class="menu__item">
             <a class="menu__link" href="{{ url('course_share', cid=cdoc.docId) }}">
-              <span class="icon icon-share"></span> {{ _('Share Course') }}
+              <span class="icon">📎</span> {{ _('Share Course') }}
             </a>
           </li>
           {% endif %}
