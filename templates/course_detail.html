@@ -366,28 +366,26 @@
 {% block script %}
 <script>
 (() => {
+  const directChild = (el, selector) => Array.from(el.children).find((child) => child.matches(selector));
+
   const setExpanded = (item, expanded) => {
-    const children = item.querySelector(':scope > .course-chapter-children');
-    const toggle = item.querySelector(':scope > .media .course-chapter-toggle');
+    const children = directChild(item, '.course-chapter-children');
+    const media = directChild(item, '.media');
+    const toggle = media ? media.querySelector('.course-chapter-toggle') : null;
     if (!children) return;
     children.classList.toggle('collapsed', !expanded);
     if (toggle) {
-      toggle.classList.toggle('collapsed', !expanded);
       toggle.textContent = expanded ? toggle.dataset.collapse : toggle.dataset.expand;
     }
   };
 
-  const root = document.querySelector('.row');
-  if (!root) return;
-  root.addEventListener('click', (ev) => {
+  document.addEventListener('click', (ev) => {
     const toggle = ev.target.closest('[name="course__chapter__toggle"]');
     if (toggle) {
       const item = toggle.closest('.course-chapter-item');
-      const children = item.querySelector(':scope > .course-chapter-children');
-      if (children) {
-        const collapsed = children.classList.contains('collapsed');
-        setExpanded(item, collapsed);
-      }
+      if (!item) return;
+      const children = directChild(item, '.course-chapter-children');
+      if (children) setExpanded(item, children.classList.contains('collapsed'));
       return;
     }
     if (ev.target.closest('[name="course__chapter__expand-all"]')) {
