@@ -4,6 +4,27 @@
 {% import "components/problem.html" as problem with context %}
 {% import "components/record.html" as record with context %}
 {% block content %}
+<style>
+  details.training__section > summary.section__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    list-style: none;
+    cursor: pointer;
+  }
+  details.training__section > summary.section__header::-webkit-details-marker {
+    display: none;
+  }
+  details.training__section > summary.section__header::before {
+    content: '▸';
+    margin-right: 8px;
+    color: #667085;
+    transition: transform 160ms ease;
+  }
+  details.training__section[open] > summary.section__header::before {
+    transform: rotate(90deg);
+  }
+</style>
 <div class="row">
   <div class="large-9 columns">
     {% if source %}
@@ -22,7 +43,7 @@
 
     <div class="section">
       <div class="section__header">
-        <h1 class="section__title">{{ cdoc.title }}</h1>
+        <h1 class="section__title">{{ _('Course') }}: {{ cdoc.title }}</h1>
         <div class="section__tools">
           {% if handler.user.own(cdoc) or handler.user.hasPerm(perm.PERM_EDIT_HOMEWORK) %}
           <a href="{{ url('course_edit', cid=cdoc.docId) }}" class="tool-button" data-tooltip="{{ _('Edit') }}">
@@ -51,45 +72,90 @@
     <div class="section">
       <div class="section__header">
         <h1 class="section__title">{{ _('Course Content') }}</h1>
+        <div class="section__tools">
+          <a href="javascript:;" name="course__section__expand-all" class="compact button">{{ _('Expand all') }}</a>
+          <a href="javascript:;" name="course__section__collapse-all" class="compact button">{{ _('Collapse all') }}</a>
+        </div>
       </div>
-      <div class="section__body">
-        {% macro render_chapter_link(chapter, depth) %}
-        <div class="media" style="margin-left: {{ depth * 18 }}px;">
-          <div class="media__left middle">
-            <div class="numbox">
-              <div class="numbox__num large">{{ (chapter.pids or [])|length }}</div>
-              <div class="numbox__text">{{ _('problems') }}</div>
-            </div>
+      {% macro render_chapter(chapter, path) %}
+      <details class="training__section" open>
+        <summary class="section__header clearfix">
+          <div class="float-left">
+            <h1 class="section__title">{{ _('Chapter') }} {{ path }}. {{ chapter.title }}</h1>
           </div>
-          <div class="media__body middle">
-            <h1 class="training__title">
-              <a href="{{ url('course_chapter', cid=cdoc.docId, chapterId=chapter._id) }}">
-                <span class="icon icon-folder text-blue"></span>
-                {{ chapter.title }}
-              </a>
-              {% if chapter.children and chapter.children|length %}
-              <span class="text-muted">· {{ chapter.children|length }} {{ _('subchapters') }}</span>
-              {% endif %}
-            </h1>
-            {% if chapter.content %}
-            <div class="training__intro typo"><p>{{ chapter.content|truncate(160) }}</p></div>
+          <div class="float-right">
+            <span class="course-chapter-meta text-muted">{{ (chapter.pids or [])|length }} {{ _('problems') }}</span>
+            {% if canEditChapter %}
+            <a href="{{ url('course_chapter_edit', cid=cdoc.docId, chapterId=chapter._id) }}" class="compact button">{{ _('Edit') }}</a>
             {% endif %}
           </div>
+        </summary>
+        <div class="training__section__detail">
+          {% if chapter.content %}
+          <div class="section__body typo richmedia">
+            {{ chapter.content|markdown|safe }}
+          </div>
+          {% endif %}
+          {% if (chapter.pids or [])|length > 0 %}
+          <div class="section__body no-padding">
+            <table class="data-table hide-problem-tag">
+              <colgroup>
+                <col class="col--pid">
+                {% if handler.user.hasPriv(PRIV.PRIV_USER_PROFILE) %}
+                <col class="col--status">
+                {% endif %}
+                <col class="col--name">
+                <col class="col--ac-tried">
+                <col class="col--difficulty">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th class="col--pid">{{ _('ID') }}</th>
+                  {% if handler.user.hasPriv(PRIV.PRIV_USER_PROFILE) %}
+                  <th class="col--status record-status--border">{{ _('Status') }}</th>
+                  {% endif %}
+                  <th class="col--name">{{ _('Problem') }}</th>
+                  <th class="col--ac-tried">{{ _('AC') }} / {{ _('Tried') }}</th>
+                  <th class="col--difficulty">{{ _('Difficulty') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for pid in chapter.pids %}
+                {% set pdoc = pdict[pid] %}
+                {% set psdoc = psdict[pid] %}
+                {% set rdoc = rdict[psdoc.rid.toString()] if psdoc and psdoc.rid else none %}
+                <tr data-pid="{{ pid }}">
+                  <td class="col--pid">{{ pdoc.docId }}</td>
+                  {% if handler.user.hasPriv(PRIV.PRIV_USER_PROFILE) %}
+                    {% if rdoc %}
+                    {{ record.render_status_td(rdoc, rid_key='_id', short=true) }}
+                    {% else %}
+                    <td class="col--status record-status--border"></td>
+                    {% endif %}
+                  {% endif %}
+                  <td class="col--name col--problem-name">
+                    {{ problem.render_problem_title(pdoc, show_tags=false) }}
+                  </td>
+                  <td class="col--ac-tried">{{ pdoc.nAccept }} / {{ pdoc.nSubmit }}</td>
+                  <td class="col--difficulty">{{ pdoc.difficulty or lib.difficulty(pdoc.nSubmit, pdoc.nAccept) or _('(None)') }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% endif %}
+          {% if chapter.children and chapter.children|length %}
+            {% for child in chapter.children %}
+            {{ render_chapter(child, path ~ '.' ~ loop.index) }}
+            {% endfor %}
+          {% endif %}
         </div>
-        {% if chapter.children and chapter.children|length %}
-          {% for child in chapter.children %}
-          {{ render_chapter_link(child, depth + 1) }}
-          {% endfor %}
-        {% endif %}
-        {% endmacro %}
-        <ol class="section__list all primary training__list">
-          {% for chapter in cdoc.chapters %}
-          <li class="section__list__item training__item">
-            {{ render_chapter_link(chapter, 0) }}
-          </li>
-          {% endfor %}
-        </ol>
-      </div>
+      </details>
+      {% endmacro %}
+
+      {% for chapter in cdoc.chapters %}
+      {{ render_chapter(chapter, loop.index) }}
+      {% endfor %}
     </div>
     {% elif pdict|length > 0 %}
     <div class="section">
@@ -251,6 +317,34 @@
       </div>
     </div>
 
+    {% if cdoc.chapters and cdoc.chapters|length > 0 %}
+    <div class="section side">
+      <div class="section__header">
+        <h1 class="section__title">{{ _('Chapter List') }}</h1>
+      </div>
+      <div class="section__body">
+        <ol class="menu">
+          {% macro render_chapter_link(chapter, path) %}
+          <li class="menu__item">
+            <a class="menu__link" href="{{ url('course_chapter', cid=cdoc.docId, chapterId=chapter._id) }}">
+              <span class="icon icon-folder"></span>
+              {{ _('Chapter') }} {{ path }}. {{ chapter.title }}
+            </a>
+          </li>
+          {% if chapter.children and chapter.children|length %}
+            {% for child in chapter.children %}
+            {{ render_chapter_link(child, path ~ '.' ~ loop.index) }}
+            {% endfor %}
+          {% endif %}
+          {% endmacro %}
+          {% for chapter in cdoc.chapters %}
+          {{ render_chapter_link(chapter, loop.index) }}
+          {% endfor %}
+        </ol>
+      </div>
+    </div>
+    {% endif %}
+
     <div class="section side">
       <div class="section__header">
         <h1 class="section__title">{{ _('Quick Links') }}</h1>
@@ -270,24 +364,22 @@
         </ol>
       </div>
     </div>
-
-    {% if cdoc.teachers and cdoc.teachers|length > 0 %}
-    <div class="section side">
-      <div class="section__header">
-        <h1 class="section__title">{{ _('Teachers') }}</h1>
-      </div>
-      <div class="section__body">
-        <ul class="user-list">
-          {% for uid in cdoc.teachers %}
-          {% set udoc = udict[uid] %}
-          {% if udoc %}
-          <li class="user-list__item">{{ user.render_inline(udoc, badge=false) }}</li>
-          {% endif %}
-          {% endfor %}
-        </ul>
-      </div>
-    </div>
-    {% endif %}
   </div>
 </div>
+{% endblock %}
+
+{% block script %}
+<script>
+(() => {
+  const root = document.querySelector('.row');
+  if (!root) return;
+  root.addEventListener('click', (ev) => {
+    if (ev.target.closest('[name="course__section__expand-all"]')) {
+      document.querySelectorAll('.training__section').forEach((el) => { el.open = true; });
+    } else if (ev.target.closest('[name="course__section__collapse-all"]')) {
+      document.querySelectorAll('.training__section').forEach((el) => { el.open = false; });
+    }
+  });
+})();
+</script>
 {% endblock %}

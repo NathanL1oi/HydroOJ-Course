@@ -714,6 +714,9 @@ class CourseDetailHandler extends Handler {
             && (this.user.own(this.cdoc)
                 || (this.cdoc.teachers || []).includes(this.user._id)
                 || this.user.hasPerm(PERM.PERM_EDIT_HOMEWORK));
+        const canEditChapter = this.user.own(this.cdoc)
+            ? this.user.hasPerm(PERM.PERM_EDIT_HOMEWORK_SELF)
+            : this.user.hasPerm(PERM.PERM_EDIT_HOMEWORK);
 
         this.response.template = 'course_detail.html';
         this.response.body = {
@@ -732,6 +735,7 @@ class CourseDetailHandler extends Handler {
             files: sortFiles(validFiles),
             source,
             canShare,
+            canEditChapter,
         };
 
         this.response.body.cdoc.content = this.response.body.cdoc.content
@@ -1288,6 +1292,10 @@ export async function apply(ctx: Context) {
         'Not Enrolled': '未参加',
         'Enrollees': '加入人数',
         'Created By': '创建者',
+        'Chapter': '章节',
+        'Chapter List': '章节列表',
+        'Expand all': '展开全部章节',
+        'Collapse all': '收起全部章节',
         'Course Detail': '课程详情',
         'Course Files': '课程文件',
         'Course Scoreboard': '成绩表',
@@ -1375,6 +1383,10 @@ export async function apply(ctx: Context) {
         'Not Enrolled': 'Not Enrolled',
         'Enrollees': 'Enrollees',
         'Created By': 'Created By',
+        'Chapter': 'Chapter',
+        'Chapter List': 'Chapter List',
+        'Expand all': 'Expand all',
+        'Collapse all': 'Collapse all',
         'Course Detail': 'Course Detail',
         'Course Files': 'Course Files',
         'Course Scoreboard': 'Scoreboard',
