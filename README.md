@@ -4,7 +4,8 @@ Course plugin for HydroOJ v5 - Enhanced training + homework functionality for cl
 
 ## Features
 
-- **Create Courses**: Create courses with introduction, problems, and file attachments
+- **Create Courses**: Create courses with an introduction, nested chapters, problems, and file attachments
+- **Nested Chapters**: Organize problems into chapters and nested subchapters
 - **Multiple Classes**: Support for multiple classes/groups per course
 - **Multiple Teachers**: Assign multiple teachers to a course
 - **Student Progress Tracking**: Track individual student progress through the course
@@ -86,7 +87,7 @@ teacher) of the source course.
 2. Pick the target domain and confirm. You will be redirected to the shared
    copy in the target domain.
 3. On the share page you can manage existing shares:
-   - **Sync** pushes the current title, introduction, problem list, time range
+   - **Sync** pushes the current title, introduction, chapters, problem list
      and files of the source course to a shared copy;
    - **Revoke** deletes the course copy in the target domain (copied problems
      are kept, as they may be referenced by other courses).

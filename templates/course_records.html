@@ -39,7 +39,7 @@
               <td class="col--status">
                 <a href="{{ url('record_detail', rid=rdoc._id) }}">
                   <span class="record-status--text {% if rdoc.status == 1 %}pass{% elif rdoc.status > 1 %}fail{% endif %}">
-                    {% if STATUS_SHORT_TEXTS[rdoc.status] %}{{ STATUS_SHORT_TEXTS[rdoc.status] }}{% else %}{{ _('Pending') }}{% endif %}
+                    {% if model.builtin.STATUS_SHORT_TEXTS[rdoc.status] %}{{ model.builtin.STATUS_SHORT_TEXTS[rdoc.status] }}{% else %}{{ _('Pending') }}{% endif %}
                   </span>
                 </a>
               </td>

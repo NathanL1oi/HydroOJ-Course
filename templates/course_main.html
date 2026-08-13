@@ -34,16 +34,12 @@
         <table class="data-table">
           <colgroup>
             <col class="col--title">
-            <col class="col--date">
-            <col class="col--date">
             <col class="col--status">
           </colgroup>
           <thead>
             <tr>
               <th class="col--title">{{ _('Title') }}</th>
-              <th class="col--date">{{ _('Begin At') }}</th>
-              <th class="col--date">{{ _('End At') }}</th>
-              <th class="col--status">{{ _('Status') }}</th>
+              <th class="col--status">{{ _('Enrolled') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -52,22 +48,11 @@
               <td class="col--title">
                 <a href="{{ url('course_detail', cid=cdoc.docId) }}">{{ cdoc.title }}</a>
               </td>
-              <td class="col--date">
-                {{ datetimeSpan(cdoc.beginAt)|safe }}
-              </td>
-              <td class="col--date">
-                {{ datetimeSpan(cdoc.endAt)|safe }}
-              </td>
               <td class="col--status">
-                {% if cdoc.endAt < now %}
-                <span class="course-status course-status--done">{{ _('Done') }}</span>
-                {% elif cdoc.beginAt > now %}
-                <span class="course-status course-status--pending">{{ _('Not Started') }}</span>
-                {% else %}
-                <span class="course-status course-status--ongoing">{{ _('Ongoing') }}</span>
-                {% endif %}
                 {% if csdict[cdoc.docId.toString()] and csdict[cdoc.docId.toString()].attend %}
                 <span class="icon icon-check" title="{{ _('Enrolled') }}"></span>
+                {% else %}
+                <span class="text-muted">-</span>
                 {% endif %}
               </td>
             </tr>

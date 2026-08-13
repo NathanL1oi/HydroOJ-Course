@@ -3,7 +3,7 @@ import {
     Context, DiscussionModel, DocumentModel, DomainModel, FileLimitExceededError,
     FileUploadError, Filter, Handler, NotFoundError, ObjectId, PERM, PermissionError,
     ProblemModel, ProblemNotAllowCopyError, ProblemNotFoundError, PRIV, RecordModel,
-    sortFiles, StorageModel, SystemModel, Time, UserModel, ValidationError,
+    sortFiles, StorageModel, SystemModel, UserModel, ValidationError,
 } from 'hydrooj';
 import { param, post, Types } from 'hydrooj';
 
@@ -24,16 +24,25 @@ export interface CourseDoc {
     maintainer?: number[];
     title: string;
     content: string; // Course introduction/description
-    beginAt: Date;
-    endAt: Date;
     attend: number; // Number of students enrolled
     pids: number[]; // Problem IDs
+    chapters?: CourseChapter[]; // Nested course chapters
     files?: Array<{ _id: string; name: string; size?: number; lastModified?: Date; etag?: string }>;
     assign?: string[]; // Assigned classes/groups
     classes?: string[]; // Multiple classes support
     teachers?: number[]; // Multiple teachers
     reference?: { domainId: string; docId: ObjectId }; // Original course for shared copies
     sharedTo?: Array<{ domainId: string; docId: ObjectId }>; // Domains this course has been shared to
+}
+
+// A nested course chapter. Chapters can contain problems directly and/or
+// contain nested child chapters.
+export interface CourseChapter {
+    _id: number;
+    title: string;
+    content?: string;
+    pids?: number[];
+    children?: CourseChapter[];
 }
 
 // Course status document interface (per student progress)
@@ -51,6 +60,78 @@ export interface CourseStatusDoc {
 }
 
 const TYPE_COURSE = 50 as const;
+
+// Collect every problem id from a nested chapter tree. Used to keep the
+// legacy `cdoc.pids` field in sync for permissions, progress, sharing, and
+// fallback rendering.
+function flattenCoursePids(chapters: CourseChapter[] = []): number[] {
+    const pids = new Set<number>();
+    const visit = (nodes: CourseChapter[]) => {
+        for (const node of nodes) {
+            (node.pids || []).forEach((pid) => pids.add(pid));
+            visit(node.children || []);
+        }
+    };
+    visit(chapters);
+    return Array.from(pids);
+}
+
+// Rewrite problem ids in a nested chapter tree after cross-domain copying.
+// Missing mappings are dropped.
+function remapCourseChapters(
+    chapters: CourseChapter[] = [],
+    pidMap: Record<number, number>,
+): CourseChapter[] {
+    return chapters.map((chapter) => ({
+        _id: chapter._id,
+        title: chapter.title,
+        content: chapter.content,
+        pids: (chapter.pids || []).map((pid) => pidMap[pid]).filter((pid) => pid != null),
+        children: remapCourseChapters(chapter.children || [], pidMap),
+    }));
+}
+
+// Parse and validate the JSON produced by the chapter editor. The structure
+// is intentionally simple so older clients can keep using the flat `pids`
+// field without affecting courses that have nested chapters.
+function parseCourseChapters(source: string): CourseChapter[] {
+    if (!source) return [];
+    let parsed: any;
+    try {
+        parsed = JSON.parse(source);
+    } catch (e) {
+        throw new ValidationError('chapters', null, 'Invalid chapter JSON');
+    }
+    if (!Array.isArray(parsed)) throw new ValidationError('chapters', null, 'Chapters must be an array');
+    const ids = new Set<number>();
+    const pids = new Set<number>();
+    const validate = (nodes: any[]): CourseChapter[] => nodes.map((node) => {
+        const _id = Number(node?._id);
+        const title = String(node?.title || '').trim();
+        if (!_id || !Number.isSafeInteger(_id)) throw new ValidationError('chapters', null, 'Each chapter needs a numeric _id');
+        if (ids.has(_id)) throw new ValidationError('chapters', null, 'Chapter _id must be unique');
+        if (!title) throw new ValidationError('chapters', null, 'Each chapter needs a title');
+        ids.add(_id);
+        const nodePids = Array.isArray(node?.pids)
+            ? node.pids.map((pid: any) => Number(pid)).filter((pid: number) => Number.isSafeInteger(pid) && pid > 0)
+            : [];
+        nodePids.forEach((pid: number) => pids.add(pid));
+        return {
+            _id,
+            title,
+            content: typeof node?.content === 'string' ? node.content : '',
+            pids: Array.from(new Set(nodePids)),
+            children: Array.isArray(node?.children) ? validate(node.children) : [],
+        };
+    });
+    return validate(parsed);
+}
+
+function courseChaptersForEditor(cdoc: CourseDoc | null): CourseChapter[] {
+    if (cdoc?.chapters?.length) return cdoc.chapters;
+    if (cdoc?.pids?.length) return [{ _id: 1, title: 'Chapter 1', pids: cdoc.pids }];
+    return [];
+}
 
 // Check whether a domain's `share` setting allows sharing to the target domain.
 // The setting matches HydroOJ's "Share problem with domain (* for any)" domain
@@ -160,28 +241,6 @@ function injectCourseNav(ctx: Context) {
     ui('Nav', 'course_main', { prefix: 'course', before: 'contest_main' }, PERM.PERM_VIEW_HOMEWORK);
 }
 
-// Normalize date fields that may arrive from MongoDB as Long/BigInt values,
-// so Nunjucks never has to compare a BigInt with a Date/number in templates.
-function toDate(value: Date | number | bigint | string | undefined | null): Date | null {
-    if (value instanceof Date) return value;
-    if (typeof value === 'bigint') return new Date(Number(value));
-    if (typeof value === 'number') return new Date(value);
-    if (typeof value === 'string') {
-        const parsed = new Date(value);
-        return Number.isNaN(parsed.getTime()) ? null : parsed;
-    }
-    return null;
-}
-
-function normalizeCourseDates(cdoc: CourseDoc | null): CourseDoc | null {
-    if (!cdoc) return cdoc;
-    return {
-        ...cdoc,
-        beginAt: toDate(cdoc.beginAt) ?? new Date(0),
-        endAt: toDate(cdoc.endAt) ?? new Date(0),
-    };
-}
-
 // Course Model
 export const CourseModel = {
     TYPE_COURSE,
@@ -192,8 +251,6 @@ export const CourseModel = {
         content: string,
         owner: number,
         pids: number[] = [],
-        beginAt: Date = new Date(),
-        endAt: Date = new Date(Date.now() + 30 * Time.day),
         args: Partial<CourseDoc> = {},
     ): Promise<ObjectId> {
         const docId = await DocumentModel.add(
@@ -206,8 +263,6 @@ export const CourseModel = {
             null,
             {
                 title,
-                beginAt,
-                endAt,
                 pids,
                 attend: 0,
                 ...args,
@@ -219,11 +274,13 @@ export const CourseModel = {
     async get(domainId: string, cid: ObjectId): Promise<CourseDoc | null> {
         const doc = await DocumentModel.get(domainId, TYPE_COURSE, cid);
         if (!doc) return null;
-        return doc as unknown as CourseDoc;
+        const cdoc = doc as unknown as CourseDoc;
+        if (cdoc.chapters?.length) cdoc.pids = flattenCoursePids(cdoc.chapters);
+        return cdoc;
     },
 
     getMulti(domainId: string, query: Filter<CourseDoc> = {}) {
-        return DocumentModel.getMulti(domainId, TYPE_COURSE, query).sort({ beginAt: -1, _id: -1 });
+        return DocumentModel.getMulti(domainId, TYPE_COURSE, query).sort({ _id: -1 });
     },
 
     async edit(domainId: string, cid: ObjectId, $set: Partial<CourseDoc>) {
@@ -262,24 +319,6 @@ export const CourseModel = {
         return await DocumentModel.count(domainId, TYPE_COURSE, query);
     },
 
-    isOngoing(cdoc: CourseDoc) {
-        const now = new Date();
-        const beginAt = toDate(cdoc.beginAt);
-        const endAt = toDate(cdoc.endAt);
-        if (!beginAt || !endAt) return false;
-        return beginAt <= now && now < endAt;
-    },
-
-    isNotStarted(cdoc: CourseDoc) {
-        const beginAt = toDate(cdoc.beginAt);
-        return !!beginAt && new Date() < beginAt;
-    },
-
-    isDone(cdoc: CourseDoc) {
-        const endAt = toDate(cdoc.endAt);
-        return !!endAt && endAt <= new Date();
-    },
-
     async share(
         domainId: string,
         cid: ObjectId,
@@ -294,8 +333,10 @@ export const CourseModel = {
         const targetDomain = await DomainModel.get(target);
         if (!targetDomain) throw new NotFoundError(target);
 
-        const pidMap = await copyCourseProblems(domainId, cdoc.pids, target, canViewHidden);
-        const pids = cdoc.pids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
+        const sourcePids = flattenCoursePids(cdoc.chapters).length ? flattenCoursePids(cdoc.chapters) : cdoc.pids;
+        const pidMap = await copyCourseProblems(domainId, sourcePids, target, canViewHidden);
+        const pids = sourcePids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
+        const chapters = cdoc.chapters?.length ? remapCourseChapters(cdoc.chapters, pidMap) : undefined;
         const maintainer = [...new Set([...(cdoc.maintainer || []), cdoc.owner])];
 
         // Sharing to the same domain again updates the existing copy instead of
@@ -316,8 +357,7 @@ export const CourseModel = {
                     title: cdoc.title,
                     content: cdoc.content,
                     pids,
-                    beginAt: cdoc.beginAt,
-                    endAt: cdoc.endAt,
+                    ...(chapters ? { chapters } : {}),
                     maintainer: mergedMaintainer,
                     teachers: cdoc.teachers,
                     assign: cdoc.assign,
@@ -333,13 +373,12 @@ export const CourseModel = {
                 cdoc.content,
                 owner,
                 pids,
-                cdoc.beginAt,
-                cdoc.endAt,
                 {
                     maintainer,
                     teachers: cdoc.teachers,
                     assign: cdoc.assign,
                     classes: cdoc.classes,
+                    ...(chapters ? { chapters } : {}),
                     reference: { domainId, docId: cid },
                 },
             );
@@ -367,8 +406,10 @@ export const CourseModel = {
         const tcdoc = await CourseModel.get(target, ref.docId);
         if (!tcdoc) throw new CourseNotFoundError(target, ref.docId);
 
-        const pidMap = await copyCourseProblems(domainId, cdoc.pids, target, canViewHidden);
-        const pids = cdoc.pids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
+        const sourcePids = flattenCoursePids(cdoc.chapters).length ? flattenCoursePids(cdoc.chapters) : cdoc.pids;
+        const pidMap = await copyCourseProblems(domainId, sourcePids, target, canViewHidden);
+        const pids = sourcePids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
+        const chapters = cdoc.chapters?.length ? remapCourseChapters(cdoc.chapters, pidMap) : undefined;
         const maintainer = [...new Set([...(cdoc.maintainer || []), cdoc.owner, ...(tcdoc.maintainer || [])])];
         const files = await copyCourseFiles(domainId, cid, target, ref.docId, cdoc.files);
 
@@ -382,8 +423,7 @@ export const CourseModel = {
             title: cdoc.title,
             content: cdoc.content,
             pids,
-            beginAt: cdoc.beginAt,
-            endAt: cdoc.endAt,
+            ...(chapters ? { chapters } : {}),
             maintainer,
             teachers: cdoc.teachers,
             assign: cdoc.assign,
@@ -466,8 +506,7 @@ class CourseMainHandler extends Handler {
         }
 
         const cursor = CourseModel.getMulti(domainId, query);
-        const [rawCdocs, cpcount] = await this.paginate(cursor, page, 'course');
-        const cdocs = rawCdocs.map((cdoc) => normalizeCourseDates(cdoc) as CourseDoc);
+        const [cdocs, cpcount] = await this.paginate(cursor, page, 'course');
 
         const tids: Set<ObjectId> = new Set();
         for (const cdoc of cdocs) tids.add(cdoc.docId);
@@ -494,7 +533,6 @@ class CourseMainHandler extends Handler {
             groups: groupsFilter,
             group,
             q,
-            now: new Date(),
         };
         this.response.template = 'course_main.html';
     }
@@ -508,7 +546,6 @@ class CourseDetailHandler extends Handler {
     async prepare(domainId: string, cid: ObjectId) {
         this.cdoc = await CourseModel.get(domainId, cid);
         if (!this.cdoc) throw new CourseNotFoundError(domainId, cid);
-        this.cdoc = normalizeCourseDates(this.cdoc) as CourseDoc;
 
         if (this.cdoc.assign?.length && !this.user.own(this.cdoc) && !this.user.hasPerm(PERM.PERM_VIEW_HIDDEN_HOMEWORK)) {
             const groups = (await UserModel.listGroup(domainId, this.user._id)).map((g) => g.name);
@@ -543,12 +580,17 @@ class CourseDetailHandler extends Handler {
         }
         const enrolledUdict = await UserModel.getListForRender(domainId, enrolledUsers);
 
-        const pdict = await ProblemModel.getList(domainId, this.cdoc.pids, true, true);
+        // New courses store nested chapters, while the flat `pids` field is kept
+        // in sync. Fall back to it for legacy data.
+        const coursePids = flattenCoursePids(this.cdoc.chapters).length
+            ? flattenCoursePids(this.cdoc.chapters)
+            : this.cdoc.pids;
+        const pdict = await ProblemModel.getList(domainId, coursePids, true, true);
 
         let psdict = {};
         let rdict = {};
         if (csdoc) {
-            const valid = (csdoc.journal || []).filter((p) => this.cdoc.pids.includes(p.pid));
+            const valid = (csdoc.journal || []).filter((p) => coursePids.includes(p.pid));
             for (const pdetail of valid) {
                 psdict[pdetail.pid] = pdetail;
                 rdict[pdetail.rid.toString()] = { _id: pdetail.rid };
@@ -576,7 +618,7 @@ class CourseDetailHandler extends Handler {
 
         this.response.template = 'course_detail.html';
         this.response.body = {
-            cdoc: normalizeCourseDates(this.cdoc),
+            cdoc: this.cdoc,
             csdoc,
             udict,
             ddocs,
@@ -589,7 +631,6 @@ class CourseDetailHandler extends Handler {
             enrolledUsers,
             enrolledUdict,
             files: sortFiles(validFiles),
-            now: new Date(),
             source,
             canShare,
         };
@@ -602,7 +643,6 @@ class CourseDetailHandler extends Handler {
     @param('cid', Types.ObjectId)
     async postAttend(domainId: string, cid: ObjectId) {
         this.checkPerm(PERM.PERM_ATTEND_HOMEWORK);
-        if (CourseModel.isDone(this.cdoc)) throw new ValidationError('Course has ended');
         await CourseModel.attend(domainId, cid, this.user._id);
         this.back();
     }
@@ -617,7 +657,6 @@ class CourseEditHandler extends Handler {
         if (cid) {
             this.cdoc = await CourseModel.get(domainId, cid);
             if (!this.cdoc) throw new CourseNotFoundError(domainId, cid);
-            this.cdoc = normalizeCourseDates(this.cdoc) as CourseDoc;
             if (!this.user.own(this.cdoc)) this.checkPerm(PERM.PERM_EDIT_HOMEWORK);
             else this.checkPerm(PERM.PERM_EDIT_HOMEWORK_SELF);
         } else {
@@ -629,20 +668,7 @@ class CourseEditHandler extends Handler {
     @param('cid', Types.ObjectId, true)
     async get(domainId: string, cid?: ObjectId) {
         const groups = await UserModel.listGroup(domainId);
-
-        let dateBeginText = '';
-        let timeBeginText = '00:00';
-        let dateEndText = '';
-        let timeEndText = '23:59';
-
-        if (this.cdoc) {
-            const beginAt = this.cdoc.beginAt;
-            const endAt = this.cdoc.endAt;
-            dateBeginText = `${beginAt.getFullYear()}-${String(beginAt.getMonth() + 1).padStart(2, '0')}-${String(beginAt.getDate()).padStart(2, '0')}`;
-            timeBeginText = `${String(beginAt.getHours()).padStart(2, '0')}:${String(beginAt.getMinutes()).padStart(2, '0')}`;
-            dateEndText = `${endAt.getFullYear()}-${String(endAt.getMonth() + 1).padStart(2, '0')}-${String(endAt.getDate()).padStart(2, '0')}`;
-            timeEndText = `${String(endAt.getHours()).padStart(2, '0')}:${String(endAt.getMinutes()).padStart(2, '0')}`;
-        }
+        const chapters = courseChaptersForEditor(this.cdoc);
 
         this.response.template = 'course_edit.html';
         this.response.body = {
@@ -650,10 +676,8 @@ class CourseEditHandler extends Handler {
             groups,
             page_name: cid ? 'course_edit' : 'course_create',
             pids: this.cdoc ? this.cdoc.pids.join(',') : '',
-            dateBeginText,
-            timeBeginText,
-            dateEndText,
-            timeEndText,
+            chaptersJson: JSON.stringify(chapters),
+            canShare: !!(cid && this.cdoc && !this.cdoc.reference),
         };
     }
 
@@ -661,10 +685,7 @@ class CourseEditHandler extends Handler {
     @param('title', Types.Title)
     @param('content', Types.Content)
     @param('pids', Types.Content, true)
-    @param('beginAtDate', Types.Date)
-    @param('beginAtTime', Types.Time)
-    @param('endAtDate', Types.Date)
-    @param('endAtTime', Types.Time)
+    @param('chapters', Types.Content, true)
     @param('maintainer', Types.NumericArray, true)
     @param('teachers', Types.NumericArray, true)
     @param('assign', Types.CommaSeperatedArray, true)
@@ -675,45 +696,39 @@ class CourseEditHandler extends Handler {
         title: string,
         content: string,
         _pids: string = '',
-        beginAtDate: string,
-        beginAtTime: string,
-        endAtDate: string,
-        endAtTime: string,
+        _chapters: string = '',
         maintainer: number[] = [],
         teachers: number[] = [],
         assign: string[] = [],
         classes: string[] = [],
     ) {
-        const pids = _pids.replace(/，/g, ',').split(',').map((i) => +i).filter((i) => i);
-        const beginAt = new Date(`${beginAtDate} ${beginAtTime}`);
-        const endAt = new Date(`${endAtDate} ${endAtTime}`);
-
-        if (isNaN(beginAt.getTime())) throw new ValidationError('beginAtDate', 'beginAtTime');
-        if (isNaN(endAt.getTime())) throw new ValidationError('endAtDate', 'endAtTime');
-        if (beginAt >= endAt) throw new ValidationError('endAtDate', 'endAtTime');
+        const chapters = _chapters ? parseCourseChapters(_chapters) : [];
+        const pids = _chapters
+            ? flattenCoursePids(chapters)
+            : _pids.replace(/，/g, ',').split(',').map((i) => +i).filter((i) => i);
 
         if (pids.length) {
             await ProblemModel.getList(domainId, pids, this.user.hasPerm(PERM.PERM_VIEW_PROBLEM_HIDDEN) || this.user._id, true);
         }
 
         if (!cid) {
-            cid = await CourseModel.add(domainId, title, content, this.user._id, pids, beginAt, endAt, {
+            cid = await CourseModel.add(domainId, title, content, this.user._id, pids, {
                 maintainer,
                 teachers,
                 assign,
                 classes,
+                ...(_chapters ? { chapters } : {}),
             });
         } else {
             await CourseModel.edit(domainId, cid, {
                 title,
                 content,
                 pids,
-                beginAt,
-                endAt,
                 maintainer,
                 teachers,
                 assign,
                 classes,
+                ...(_chapters ? { chapters } : {}),
             });
         }
 
@@ -823,7 +838,6 @@ class CourseShareHandler extends Handler {
     async prepare(domainId: string, cid: ObjectId) {
         this.cdoc = await CourseModel.get(domainId, cid);
         if (!this.cdoc) throw new CourseNotFoundError(domainId, cid);
-        this.cdoc = normalizeCourseDates(this.cdoc) as CourseDoc;
         const canManage = this.user.own(this.cdoc) || (this.cdoc.teachers || []).includes(this.user._id);
         if (canManage) this.checkPerm(PERM.PERM_EDIT_HOMEWORK_SELF);
         else this.checkPerm(PERM.PERM_EDIT_HOMEWORK);
@@ -853,15 +867,14 @@ class CourseShareHandler extends Handler {
                 CourseModel.get(ref.domainId, ref.docId),
             ]);
             if (!ddoc) continue;
-            shares.push({ domain: ddoc, cdoc: normalizeCourseDates(scdoc), ref });
+            shares.push({ domain: ddoc, cdoc: scdoc, ref });
         }
 
         this.response.template = 'course_share.html';
         this.response.body = {
-            cdoc: normalizeCourseDates(this.cdoc),
+            cdoc: this.cdoc,
             targets,
             shares,
-            now: new Date(),
         };
     }
 
@@ -1025,9 +1038,20 @@ export async function apply(ctx: Context) {
         'Problem List': '题目列表',
         'Teachers': '教师',
         'Classes': '班级',
-        'Course has ended': '课程已结束',
         'Already enrolled in this course': '已加入该课程',
         'Course not found': '课程未找到',
+        'Chapters': '章节',
+        'Add chapters and nested subchapters. Each chapter can contain problems or child chapters.': '添加章节与嵌套子章节。每个章节可包含题目或子章节。',
+        'Course Content': '课程内容',
+        'problems': '道题',
+        'subchapters': '个子章节',
+        'Problems': '题目',
+        'No problems in this chapter.': '本章节暂无题目。',
+        'No courses found.': '暂无课程。',
+        'enrolled': '已加入',
+        'Enrolled': '已加入',
+        'Shared': '已分享',
+        'Not Submitted': '未提交',
         'Upload Lecture': '上传讲义',
         'Manage Files': '管理文件',
         'Total Score': '总分',
@@ -1053,8 +1077,6 @@ export async function apply(ctx: Context) {
         'Revoke': '撤销分享',
         'Domain': '域',
         'Actions': '操作',
-        'Ongoing': '进行中',
-        'Ended': '已结束',
         'Domain share setting hint': '可在当前域的“域设置”中配置允许分享的域(填写 * 表示允许所有域)。',
         'Shared from domain': '来自域',
         'Revoke hint': '撤销分享会删除目标域中的课程副本(保留已复制的题目)。',
@@ -1084,9 +1106,20 @@ export async function apply(ctx: Context) {
         'Problem List': 'Problem List',
         'Teachers': 'Teachers',
         'Classes': 'Classes',
-        'Course has ended': 'Course has ended',
         'Already enrolled in this course': 'Already enrolled in this course',
         'Course not found': 'Course not found',
+        'Chapters': 'Chapters',
+        'Add chapters and nested subchapters. Each chapter can contain problems or child chapters.': 'Add chapters and nested subchapters. Each chapter can contain problems or child chapters.',
+        'Course Content': 'Course Content',
+        'problems': 'problems',
+        'subchapters': 'subchapters',
+        'Problems': 'Problems',
+        'No problems in this chapter.': 'No problems in this chapter.',
+        'No courses found.': 'No courses found.',
+        'enrolled': 'enrolled',
+        'Enrolled': 'Enrolled',
+        'Shared': 'Shared',
+        'Not Submitted': 'Not Submitted',
         'Upload Lecture': 'Upload Lecture',
         'Manage Files': 'Manage Files',
         'Total Score': 'Total Score',
@@ -1112,8 +1145,6 @@ export async function apply(ctx: Context) {
         'Revoke': 'Revoke',
         'Domain': 'Domain',
         'Actions': 'Actions',
-        'Ongoing': 'Ongoing',
-        'Ended': 'Ended',
         'Domain share setting hint': 'Configure allowed target domains in the "Share problem with domain" domain setting of the source domain (use * to allow all domains).',
         'Shared from domain': 'Shared from domain',
         'Revoke hint': 'Revoking deletes the course copy in the target domain (copied problems are kept).',

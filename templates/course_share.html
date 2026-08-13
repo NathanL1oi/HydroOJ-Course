@@ -69,10 +69,10 @@
                 {% endif %}
               </td>
               <td class="col--status">
-                {% if s.cdoc and s.cdoc.endAt > now %}
-                <span class="text-green">{{ _('Ongoing') }}</span>
+                {% if s.cdoc %}
+                <span class="text-green">{{ _('Shared') }}</span>
                 {% else %}
-                <span class="text-muted">{{ _('Ended') }}</span>
+                <span class="text-muted">{{ _('Course not found') }}</span>
                 {% endif %}
               </td>
               <td class="col--action">
