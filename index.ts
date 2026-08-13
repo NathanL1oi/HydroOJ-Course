@@ -608,6 +608,20 @@ class CourseMainHandler extends Handler {
         if (q) qs += `${qs ? '&' : ''}q=${encodeURIComponent(q)}`;
         const groupsFilter = groups.filter((i) => !Number.isSafeInteger(+i));
 
+        let enrolled: Array<{ cdoc: CourseDoc; csdoc: CourseStatusDoc }> = [];
+        if (this.user.hasPriv(PRIV.PRIV_USER_PROFILE)) {
+            const esdocs = await CourseModel.getMultiStatus(domainId, { uid: this.user._id, attend: 1 }).toArray();
+            if (esdocs.length) {
+                const ecids = esdocs.map((s) => s.docId);
+                const ecourses = await CourseModel.getMulti(domainId, { docId: { $in: ecids } }).toArray();
+                const ecourseDict: Record<string, CourseDoc> = {};
+                for (const cdoc of ecourses) ecourseDict[cdoc.docId.toString()] = cdoc;
+                enrolled = esdocs
+                    .map((csdoc) => ({ cdoc: ecourseDict[csdoc.docId.toString()], csdoc }))
+                    .filter((e) => e.cdoc);
+            }
+        }
+
         this.response.body = {
             cdocs,
             csdict,
@@ -617,6 +631,7 @@ class CourseMainHandler extends Handler {
             groups: groupsFilter,
             group,
             q,
+            enrolled,
         };
         this.response.template = 'course_main.html';
     }
@@ -765,9 +780,16 @@ class CourseChapterHandler extends Handler {
 
         const csdoc = await CourseModel.getStatus(domainId, cid, this.user._id);
         const psdict = {};
+        let rdict = {};
         if (csdoc) {
             const valid = (csdoc.journal || []).filter((p) => chapterPids.includes(p.pid));
-            for (const pdetail of valid) psdict[pdetail.pid] = pdetail;
+            for (const pdetail of valid) {
+                psdict[pdetail.pid] = pdetail;
+                rdict[pdetail.rid.toString()] = { _id: pdetail.rid };
+            }
+            if (valid.length) {
+                rdict = await RecordModel.getList(domainId, valid.map((pdetail) => pdetail.rid));
+            }
         }
 
         this.response.template = 'course_chapter.html';
@@ -781,6 +803,7 @@ class CourseChapterHandler extends Handler {
             chapterPids,
             pdict,
             psdict,
+            rdict,
             canEditChapter,
         };
     }
@@ -1253,6 +1276,18 @@ export async function apply(ctx: Context) {
         'Create Course': '创建课程',
         'Edit Course': '编辑课程',
         'Course List': '课程列表',
+        'All Courses': '全部课程',
+        'Search courses...': '搜索课程...',
+        '{0} chapters': '{0} 个章节',
+        '{0} problems': '{0} 道题',
+        'New Course': '新建课程',
+        'You can create your own courses and share them with others.': '你可以创建自己的课程并与他人分享。',
+        'Complete': '完成',
+        'Course': '课程',
+        'You have not enrolled in any course.': '你还没有加入任何课程。',
+        'Not Enrolled': '未加入',
+        'Enrollees': '加入人数',
+        'Created By': '创建者',
         'Course Detail': '课程详情',
         'Course Files': '课程文件',
         'Course Scoreboard': '成绩表',
@@ -1328,6 +1363,18 @@ export async function apply(ctx: Context) {
         'Create Course': 'Create Course',
         'Edit Course': 'Edit Course',
         'Course List': 'Course List',
+        'All Courses': 'All Courses',
+        'Search courses...': 'Search courses...',
+        '{0} chapters': '{0} chapters',
+        '{0} problems': '{0} problems',
+        'New Course': 'New Course',
+        'You can create your own courses and share them with others.': 'You can create your own courses and share them with others.',
+        'Complete': 'Complete',
+        'Course': 'Course',
+        'You have not enrolled in any course.': 'You have not enrolled in any course.',
+        'Not Enrolled': 'Not Enrolled',
+        'Enrollees': 'Enrollees',
+        'Created By': 'Created By',
         'Course Detail': 'Course Detail',
         'Course Files': 'Course Files',
         'Course Scoreboard': 'Scoreboard',
