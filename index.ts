@@ -870,14 +870,14 @@ class CourseChapterEditHandler extends Handler {
     @param('cid', Types.ObjectId)
     @param('chapterId', Types.PositiveInt)
     @param('title', Types.Title)
-    @param('content', Types.Content)
+    @param('content', Types.Content, true)
     @param('pids', Types.Content, true)
     async postUpdate(
         domainId: string,
         cid: ObjectId,
         chapterId: number,
         title: string,
-        content: string,
+        content = '',
         _pids: string = '',
     ) {
         const rawPids = _pids.replace(/，/g, ',').split(',').map((i) => i.trim()).filter((i) => i);

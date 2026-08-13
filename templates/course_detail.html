@@ -110,9 +110,6 @@
                 {{ _('Chapter') }} {{ path }}. {{ chapter.title }}
               </a>
             </h1>
-            {% if chapter.content %}
-            <div class="training__intro typo"><p>{{ chapter.content|truncate(160) }}</p></div>
-            {% endif %}
           </div>
           {% if canEditChapter %}
           <div class="media__right middle">
