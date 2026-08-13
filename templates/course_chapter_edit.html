@@ -1,5 +1,34 @@
 {% extends "layout/basic.html" %}
 {% block content %}
+<style>
+  .course-problem-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .course-problem-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid rgba(227, 232, 239, 0.7);
+    border-radius: 8px;
+    padding: 6px 10px;
+    background: rgba(255, 255, 255, 0.45);
+  }
+  .course-problem-row .course-problem-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
+  }
+  .course-problem-row .button {
+    margin: 0;
+    padding: 2px 8px;
+    line-height: 1.4;
+  }
+</style>
 <div class="row">
   <div class="medium-9 columns">
     <div class="section">
@@ -33,8 +62,17 @@
           </div>
           <div class="row">
             <div class="columns">
-              <label>{{ _('Problem IDs') }} ({{ _('comma separated') }})</label>
-              <input type="text" name="pids" value="{{ pids }}" placeholder="1001, 1002, P1003">
+              <label>{{ _('Problems') }}</label>
+              <div id="course-chapter-problems" class="course-problem-editor"></div>
+              <div class="row">
+                <div class="columns medium-8">
+                  <input type="text" id="course-problem-add-input" class="textbox" placeholder="1001, 1002, P1003">
+                </div>
+                <div class="columns medium-4">
+                  <button type="button" id="course-problem-add" class="rounded primary button">{{ _('Add') }}</button>
+                </div>
+              </div>
+              <input type="hidden" name="pids" id="course-pids" value="{{ pids }}">
             </div>
           </div>
           <div class="row">
@@ -109,4 +147,97 @@
     </div>
   </div>
 </div>
+{% endblock %}
+
+{% block script %}
+<script>
+(() => {
+  const root = document.getElementById('course-chapter-problems');
+  const pidsInput = document.getElementById('course-pids');
+  const addInput = document.getElementById('course-problem-add-input');
+  const addBtn = document.getElementById('course-problem-add');
+  if (!root || !pidsInput) return;
+
+  let problems = [];
+  try {
+    problems = {{ problems|json|safe }} || [];
+  } catch (e) {
+    problems = [];
+  }
+  problems = problems.map((p) => ({ id: String(p.id), title: String(p.title || p.id) }));
+
+  const sync = () => {
+    pidsInput.value = problems.map((p) => p.id).join(',');
+  };
+
+  const makeButton = (label, title) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'rounded button';
+    b.textContent = label;
+    if (title) b.title = title;
+    return b;
+  };
+
+  const render = () => {
+    root.innerHTML = '';
+    problems.forEach((p, index) => {
+      const row = document.createElement('div');
+      row.className = 'course-problem-row';
+
+      const title = document.createElement('span');
+      title.className = 'course-problem-title';
+      title.textContent = `${index + 1}. ${p.title}`;
+      row.appendChild(title);
+
+      const up = makeButton('↑', '{{ _('Move up') }}');
+      up.disabled = index === 0;
+      up.addEventListener('click', () => {
+        [problems[index - 1], problems[index]] = [problems[index], problems[index - 1]];
+        render();
+      });
+      row.appendChild(up);
+
+      const down = makeButton('↓', '{{ _('Move down') }}');
+      down.disabled = index === problems.length - 1;
+      down.addEventListener('click', () => {
+        [problems[index + 1], problems[index]] = [problems[index], problems[index + 1]];
+        render();
+      });
+      row.appendChild(down);
+
+      const remove = makeButton('✕', '{{ _('Remove') }}');
+      remove.addEventListener('click', () => {
+        problems.splice(index, 1);
+        render();
+      });
+      row.appendChild(remove);
+
+      root.appendChild(row);
+    });
+    sync();
+  };
+
+  const addProblem = () => {
+    const raw = (addInput.value || '').trim();
+    if (!raw) return;
+    const ids = raw.replace(/，/g, ',').split(',').map((s) => s.trim()).filter((s) => s);
+    ids.forEach((id) => {
+      if (!problems.some((p) => p.id === id)) problems.push({ id, title: id });
+    });
+    addInput.value = '';
+    render();
+  };
+
+  if (addBtn) addBtn.addEventListener('click', addProblem);
+  if (addInput) addInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      addProblem();
+    }
+  });
+
+  render();
+})();
+</script>
 {% endblock %}

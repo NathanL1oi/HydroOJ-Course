@@ -197,7 +197,8 @@ async function resolveProblemIds(
     domainId: string,
     rawPids: (number | string)[],
 ): Promise<{ pids: number[]; pidMap: Record<string, number> }> {
-    const pids = new Set<number>();
+    const pids: number[] = [];
+    const seen = new Set<number>();
     const pidMap: Record<string, number> = {};
     for (const raw of rawPids) {
         const key = String(raw).trim();
@@ -211,10 +212,13 @@ async function resolveProblemIds(
             if (pdoc) docId = pdoc.docId;
         }
         if (docId == null) throw new ProblemNotFoundError(domainId, key);
-        pids.add(docId);
+        if (!seen.has(docId)) {
+            seen.add(docId);
+            pids.push(docId);
+        }
         pidMap[key] = docId;
     }
-    return { pids: Array.from(pids), pidMap };
+    return { pids, pidMap };
 }
 
 // Check whether a domain's `share` setting allows sharing to the target domain.
@@ -838,12 +842,16 @@ class CourseChapterEditHandler extends Handler {
     @param('chapterId', Types.PositiveInt)
     async get(domainId: string, cid: ObjectId, chapterId: number) {
         const chapter = this.chapterPath[this.chapterPath.length - 1];
+        const chapterPids = (chapter.pids || []).map((pid) => Number(pid)).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+        const pdict = await ProblemModel.getList(domainId, chapterPids, true, false);
+        const problems = chapterPids.map((pid) => ({ id: pid, title: pdict[pid]?.title || String(pid) }));
         this.response.template = 'course_chapter_edit.html';
         this.response.body = {
             cdoc: this.cdoc,
             chapter,
             chapterPath: this.chapterPath,
             pids: (chapter.pids || []).join(', '),
+            problems,
         };
     }
 
@@ -1334,6 +1342,10 @@ export async function apply(ctx: Context) {
         'Add Subchapter': '添加子章节',
         'Back to Chapter': '返回章节',
         'Back to Course': '返回课程',
+        'Move up': '上移',
+        'Move down': '下移',
+        'Remove': '移除',
+        'Add': '添加',
         'No problems in this chapter.': '本章节暂无题目。',
         'No courses found.': '暂无课程。',
         'enrolled': '已参加',
@@ -1427,6 +1439,10 @@ export async function apply(ctx: Context) {
         'Add Subchapter': 'Add Subchapter',
         'Back to Chapter': 'Back to Chapter',
         'Back to Course': 'Back to Course',
+        'Move up': 'Move up',
+        'Move down': 'Move down',
+        'Remove': 'Remove',
+        'Add': 'Add',
         'No problems in this chapter.': 'No problems in this chapter.',
         'No courses found.': 'No courses found.',
         'enrolled': 'enrolled',
