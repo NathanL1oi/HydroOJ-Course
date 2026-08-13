@@ -55,6 +55,31 @@
     white-space: nowrap;
     line-height: 1;
   }
+  .course-chapter-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 140px;
+  }
+  .course-progress-text {
+    font-size: 12px;
+    color: #667085;
+    white-space: nowrap;
+  }
+  .course-progress-bar {
+    flex: 1;
+    height: 6px;
+    min-width: 80px;
+    border-radius: 999px;
+    background: #eef2f6;
+    overflow: hidden;
+  }
+  .course-progress-track {
+    height: 100%;
+    border-radius: 999px;
+    background: #2f5bcd;
+    transition: width 160ms ease;
+  }
 </style>
 <div class="row">
   <div class="large-9 columns">
@@ -101,10 +126,6 @@
             {% if chapter.children and chapter.children|length %}
             <button type="button" class="course-chapter-toggle" name="course__chapter__toggle" data-expand="▸" data-collapse="▾">▾</button>
             {% endif %}
-            <div class="numbox">
-              <div class="numbox__num large">{{ (chapter.pids or [])|length }}</div>
-              <div class="numbox__text">{{ _('problems') }}</div>
-            </div>
           </div>
           <div class="media__body middle">
             <h1 class="training__title">
@@ -113,13 +134,17 @@
               </a>
             </h1>
           </div>
-          {% if canEditChapter %}
-          <div class="media__right middle">
+          <div class="media__right middle course-chapter-progress">
+            {% set cp = chapterProgress[chapter._id] or { done: 0, total: 0 } %}
+            {% set progress = (100 * cp.done / cp.total)|round|int if cp.total else 0 %}
+            <span class="course-progress-text">{{ cp.done }}/{{ cp.total }}</span>
+            <div class="course-progress-bar"><div class="course-progress-track" style="width: {{ progress }}%;"></div></div>
+            {% if canEditChapter %}
             <a href="{{ url('course_chapter_edit', cid=cdoc.docId, chapterId=chapter._id) }}" class="tool-button" data-tooltip="{{ _('Edit') }}">
               <span class="icon icon-edit"></span>
             </a>
+            {% endif %}
           </div>
-          {% endif %}
         </div>
         {% if chapter.children and chapter.children|length %}
         <ol class="section__list training__list course-chapter-children">

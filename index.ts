@@ -703,6 +703,19 @@ class CourseDetailHandler extends Handler {
             }
         }
 
+        const chapterProgress: Record<number, { done: number; total: number }> = {};
+        const computeChapterProgress = (chapters: CourseChapter[]) => {
+            for (const chapter of chapters) {
+                const pids = (chapter.pids || []).map((pid) => Number(pid)).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+                chapterProgress[chapter._id] = {
+                    total: pids.length,
+                    done: pids.filter((pid) => psdict[pid] && psdict[pid].status === 1).length,
+                };
+                computeChapterProgress(chapter.children || []);
+            }
+        };
+        computeChapterProgress(this.cdoc.chapters || []);
+
         const validFiles = (this.cdoc.files || []).filter((f) => f && f.name);
 
         let source: { ddoc: any; cdoc: CourseDoc } | null = null;
@@ -740,6 +753,7 @@ class CourseDetailHandler extends Handler {
             source,
             canShare,
             canEditChapter,
+            chapterProgress,
         };
 
         this.response.body.cdoc.content = this.response.body.cdoc.content
