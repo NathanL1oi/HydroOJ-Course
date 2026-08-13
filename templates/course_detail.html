@@ -1,4 +1,5 @@
 {% extends "layout/basic.html" %}
+{% import "components/paginator.html" as paginator with context %}
 {% block content %}
 <div class="row">
   <div class="medium-9 columns">
@@ -159,7 +160,7 @@
           <span class="text-muted">{{ udict[ddoc.owner].uname }}</span>
         </div>
         {% endfor %}
-        {{ paginate(page, dpcount, url('course_detail', cid=cdoc.docId)) }}
+        {{ paginator.render(page, dpcount) }}
         {% else %}
         <p class="text-muted">{{ _('No discussions yet.') }}</p>
         {% endif %}

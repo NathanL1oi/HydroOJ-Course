@@ -160,6 +160,28 @@ function injectCourseNav(ctx: Context) {
     ui('Nav', 'course_main', { prefix: 'course', before: 'contest_main' }, PERM.PERM_VIEW_HOMEWORK);
 }
 
+// Normalize date fields that may arrive from MongoDB as Long/BigInt values,
+// so Nunjucks never has to compare a BigInt with a Date/number in templates.
+function toDate(value: Date | number | bigint | string | undefined | null): Date | null {
+    if (value instanceof Date) return value;
+    if (typeof value === 'bigint') return new Date(Number(value));
+    if (typeof value === 'number') return new Date(value);
+    if (typeof value === 'string') {
+        const parsed = new Date(value);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+    return null;
+}
+
+function normalizeCourseDates(cdoc: CourseDoc | null): CourseDoc | null {
+    if (!cdoc) return cdoc;
+    return {
+        ...cdoc,
+        beginAt: toDate(cdoc.beginAt) ?? new Date(0),
+        endAt: toDate(cdoc.endAt) ?? new Date(0),
+    };
+}
+
 // Course Model
 export const CourseModel = {
     TYPE_COURSE,
@@ -242,15 +264,20 @@ export const CourseModel = {
 
     isOngoing(cdoc: CourseDoc) {
         const now = new Date();
-        return cdoc.beginAt <= now && now < cdoc.endAt;
+        const beginAt = toDate(cdoc.beginAt);
+        const endAt = toDate(cdoc.endAt);
+        if (!beginAt || !endAt) return false;
+        return beginAt <= now && now < endAt;
     },
 
     isNotStarted(cdoc: CourseDoc) {
-        return new Date() < cdoc.beginAt;
+        const beginAt = toDate(cdoc.beginAt);
+        return !!beginAt && new Date() < beginAt;
     },
 
     isDone(cdoc: CourseDoc) {
-        return cdoc.endAt <= new Date();
+        const endAt = toDate(cdoc.endAt);
+        return !!endAt && endAt <= new Date();
     },
 
     async share(
@@ -439,7 +466,8 @@ class CourseMainHandler extends Handler {
         }
 
         const cursor = CourseModel.getMulti(domainId, query);
-        const [cdocs, cpcount] = await this.paginate(cursor, page, 'course');
+        const [rawCdocs, cpcount] = await this.paginate(cursor, page, 'course');
+        const cdocs = rawCdocs.map((cdoc) => normalizeCourseDates(cdoc) as CourseDoc);
 
         const tids: Set<ObjectId> = new Set();
         for (const cdoc of cdocs) tids.add(cdoc.docId);
@@ -480,6 +508,7 @@ class CourseDetailHandler extends Handler {
     async prepare(domainId: string, cid: ObjectId) {
         this.cdoc = await CourseModel.get(domainId, cid);
         if (!this.cdoc) throw new CourseNotFoundError(domainId, cid);
+        this.cdoc = normalizeCourseDates(this.cdoc) as CourseDoc;
 
         if (this.cdoc.assign?.length && !this.user.own(this.cdoc) && !this.user.hasPerm(PERM.PERM_VIEW_HIDDEN_HOMEWORK)) {
             const groups = (await UserModel.listGroup(domainId, this.user._id)).map((g) => g.name);
@@ -547,7 +576,7 @@ class CourseDetailHandler extends Handler {
 
         this.response.template = 'course_detail.html';
         this.response.body = {
-            cdoc: this.cdoc,
+            cdoc: normalizeCourseDates(this.cdoc),
             csdoc,
             udict,
             ddocs,
@@ -588,6 +617,7 @@ class CourseEditHandler extends Handler {
         if (cid) {
             this.cdoc = await CourseModel.get(domainId, cid);
             if (!this.cdoc) throw new CourseNotFoundError(domainId, cid);
+            this.cdoc = normalizeCourseDates(this.cdoc) as CourseDoc;
             if (!this.user.own(this.cdoc)) this.checkPerm(PERM.PERM_EDIT_HOMEWORK);
             else this.checkPerm(PERM.PERM_EDIT_HOMEWORK_SELF);
         } else {
@@ -793,6 +823,7 @@ class CourseShareHandler extends Handler {
     async prepare(domainId: string, cid: ObjectId) {
         this.cdoc = await CourseModel.get(domainId, cid);
         if (!this.cdoc) throw new CourseNotFoundError(domainId, cid);
+        this.cdoc = normalizeCourseDates(this.cdoc) as CourseDoc;
         const canManage = this.user.own(this.cdoc) || (this.cdoc.teachers || []).includes(this.user._id);
         if (canManage) this.checkPerm(PERM.PERM_EDIT_HOMEWORK_SELF);
         else this.checkPerm(PERM.PERM_EDIT_HOMEWORK);
@@ -822,12 +853,12 @@ class CourseShareHandler extends Handler {
                 CourseModel.get(ref.domainId, ref.docId),
             ]);
             if (!ddoc) continue;
-            shares.push({ domain: ddoc, cdoc: scdoc, ref });
+            shares.push({ domain: ddoc, cdoc: normalizeCourseDates(scdoc), ref });
         }
 
         this.response.template = 'course_share.html';
         this.response.body = {
-            cdoc: this.cdoc,
+            cdoc: normalizeCourseDates(this.cdoc),
             targets,
             shares,
             now: new Date(),

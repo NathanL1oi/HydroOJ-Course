@@ -1,4 +1,5 @@
 {% extends "layout/basic.html" %}
+{% import "components/paginator.html" as paginator with context %}
 {% block content %}
 <div class="row">
   <div class="medium-9 columns">
@@ -73,7 +74,7 @@
             {% endfor %}
           </tbody>
         </table>
-        {{ paginate(page, cpcount, url('course_main'), qs) }}
+        {{ paginator.render(page, cpcount, add_qs=qs) }}
         {% endif %}
       </div>
     </div>
