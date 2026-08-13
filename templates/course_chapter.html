@@ -45,7 +45,6 @@
         {% if chapterPids|length > 0 %}
         <table class="data-table hide-problem-tag">
           <colgroup>
-            <col class="col--pid">
             {% if handler.user.hasPriv(PRIV.PRIV_USER_PROFILE) %}
             <col class="col--status">
             {% endif %}
@@ -55,7 +54,6 @@
           </colgroup>
           <thead>
             <tr>
-              <th class="col--pid">{{ _('ID') }}</th>
               {% if handler.user.hasPriv(PRIV.PRIV_USER_PROFILE) %}
               <th class="col--status record-status--border">{{ _('Status') }}</th>
               {% endif %}
@@ -70,7 +68,6 @@
             {% set psdoc = psdict[pid] %}
             {% set rdoc = rdict[psdoc.rid.toString()] if psdoc and psdoc.rid else none %}
             <tr data-pid="{{ pid }}">
-              <td class="col--pid">{{ pdoc.docId }}</td>
               {% if handler.user.hasPriv(PRIV.PRIV_USER_PROFILE) %}
                 {% if rdoc %}
                 {{ record.render_status_td(rdoc, rid_key='_id', short=true) }}
@@ -79,7 +76,7 @@
                 {% endif %}
               {% endif %}
               <td class="col--name col--problem-name">
-                {{ problem.render_problem_title(pdoc, show_tags=false) }}
+                {{ problem.render_problem_title(pdoc, show_tags=false, show_pid=false) }}
               </td>
               <td class="col--ac-tried">{{ pdoc.nAccept }} / {{ pdoc.nSubmit }}</td>
               <td class="col--difficulty">{{ pdoc.difficulty or lib.difficulty(pdoc.nSubmit, pdoc.nAccept) or _('(None)') }}</td>

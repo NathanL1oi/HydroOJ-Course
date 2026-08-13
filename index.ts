@@ -1338,6 +1338,26 @@ export async function apply(ctx: Context) {
     // Navigation entry: after Training, before Contest.
     injectCourseNav(ctx);
 
+    // Track course problem status whenever a submission is judged.
+    ctx.on('record/judge', async (rdoc) => {
+        if (!rdoc || rdoc.contest) return;
+        const { domainId, pid, uid } = rdoc as any;
+        if (!domainId || !pid || !uid) return;
+        const cdocs = await CourseModel.getMulti(domainId, { pids: pid }).toArray();
+        for (const cdoc of cdocs) {
+            const csdoc = await CourseModel.getStatus(domainId, cdoc.docId, uid);
+            if (!csdoc || (!csdoc.enroll && !csdoc.attend)) continue;
+            const journal = csdoc.journal || [];
+            const idx = journal.findIndex((j) => j.pid === pid);
+            const entry = { pid, rid: rdoc._id, score: rdoc.score || 0, status: rdoc.status };
+            if (idx >= 0) journal[idx] = entry;
+            else journal.push(entry);
+            const progress = csdoc.progress || {};
+            progress[pid] = { rid: rdoc._id, score: rdoc.score || 0, status: rdoc.status };
+            await CourseModel.setStatus(domainId, cdoc.docId, uid, { journal, progress } as any);
+        }
+    });
+
     ctx.i18n.load('zh', {
         course: '课程',
         course_main: '课程',
