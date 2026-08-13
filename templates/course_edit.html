@@ -178,7 +178,7 @@
     _id: Number(node._id),
     title: String(node.title || ''),
     content: String(node.content || ''),
-    pids: Array.isArray(node.pids) ? node.pids.map(Number).filter((pid) => pid > 0) : [],
+    pids: Array.isArray(node.pids) ? node.pids.map((pid) => String(pid).trim()).filter((pid) => pid) : [],
     children: Array.isArray(node.children) ? node.children.map(normalizeNode) : [],
   });
   chapters = chapters.map(normalizeNode);
@@ -322,8 +322,8 @@
     pids.className = 'textbox';
     pids.value = (node.pids || []).join(', ');
     pids.placeholder = '1001, 1002, 1003';
-    pids.addEventListener('change', () => {
-      node.pids = pids.value.replace(/，/g, ',').split(',').map((i) => Number(i.trim())).filter((i) => i > 0);
+    pids.addEventListener('input', () => {
+      node.pids = pids.value.replace(/，/g, ',').split(',').map((i) => i.trim()).filter((i) => i);
       sync();
     });
     pidsLabel.appendChild(pids);
@@ -362,6 +362,9 @@
   root.parentNode.insertBefore(addRootButton, root.nextSibling);
 
   render();
+
+  const form = root.closest('form');
+  if (form) form.addEventListener('submit', sync);
 })();
 </script>
 {% endblock %}

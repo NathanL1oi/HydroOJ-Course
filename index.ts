@@ -41,7 +41,7 @@ export interface CourseChapter {
     _id: number;
     title: string;
     content?: string;
-    pids?: number[];
+    pids?: (number | string)[];
     children?: CourseChapter[];
 }
 
@@ -64,8 +64,8 @@ const TYPE_COURSE = 50 as const;
 // Collect every problem id from a nested chapter tree. Used to keep the
 // legacy `cdoc.pids` field in sync for permissions, progress, sharing, and
 // fallback rendering.
-function flattenCoursePids(chapters: CourseChapter[] = []): number[] {
-    const pids = new Set<number>();
+function flattenCoursePids(chapters: CourseChapter[] = []): (number | string)[] {
+    const pids = new Set<number | string>();
     const visit = (nodes: CourseChapter[]) => {
         for (const node of nodes) {
             (node.pids || []).forEach((pid) => pids.add(pid));
@@ -80,13 +80,13 @@ function flattenCoursePids(chapters: CourseChapter[] = []): number[] {
 // Missing mappings are dropped.
 function remapCourseChapters(
     chapters: CourseChapter[] = [],
-    pidMap: Record<number, number>,
+    pidMap: Record<string, number>,
 ): CourseChapter[] {
     return chapters.map((chapter) => ({
         _id: chapter._id,
         title: chapter.title,
         content: chapter.content,
-        pids: (chapter.pids || []).map((pid) => pidMap[pid]).filter((pid) => pid != null),
+        pids: (chapter.pids || []).map((pid) => pidMap[String(pid)]).filter((pid) => pid != null),
         children: remapCourseChapters(chapter.children || [], pidMap),
     }));
 }
@@ -113,9 +113,9 @@ function parseCourseChapters(source: string): CourseChapter[] {
         if (!title) throw new ValidationError('chapters', null, 'Each chapter needs a title');
         ids.add(_id);
         const nodePids = Array.isArray(node?.pids)
-            ? node.pids.map((pid: any) => Number(pid)).filter((pid: number) => Number.isSafeInteger(pid) && pid > 0)
+            ? node.pids.map((pid: any) => String(pid).trim()).filter((pid: string) => pid)
             : [];
-        nodePids.forEach((pid: number) => pids.add(pid));
+        nodePids.forEach((pid: string) => pids.add(pid));
         return {
             _id,
             title,
@@ -131,6 +131,33 @@ function courseChaptersForEditor(cdoc: CourseDoc | null): CourseChapter[] {
     if (cdoc?.chapters?.length) return cdoc.chapters;
     if (cdoc?.pids?.length) return [{ _id: 1, title: 'Chapter 1', pids: cdoc.pids }];
     return [];
+}
+
+// Resolve raw problem identifiers to numeric doc ids. Numeric strings are
+// treated as doc ids (matching HydroOJ's own problem URL handling); anything
+// else is treated as a problem pid string such as "P1001".
+async function resolveProblemIds(
+    domainId: string,
+    rawPids: (number | string)[],
+): Promise<{ pids: number[]; pidMap: Record<string, number> }> {
+    const pids = new Set<number>();
+    const pidMap: Record<string, number> = {};
+    for (const raw of rawPids) {
+        const key = String(raw).trim();
+        if (!key) continue;
+        let docId: number | null = null;
+        if (/^[0-9]+$/.test(key)) {
+            const n = Number(key);
+            if (Number.isSafeInteger(n) && n > 0) docId = n;
+        } else {
+            const pdoc = await ProblemModel.get(domainId, key, ProblemModel.PROJECTION_PUBLIC, true);
+            if (pdoc) docId = pdoc.docId;
+        }
+        if (docId == null) throw new ProblemNotFoundError(domainId, key);
+        pids.add(docId);
+        pidMap[key] = docId;
+    }
+    return { pids: Array.from(pids), pidMap };
 }
 
 // Check whether a domain's `share` setting allows sharing to the target domain.
@@ -149,8 +176,8 @@ async function copyCourseProblems(
     pids: number[],
     target: string,
     canViewHidden: number | boolean,
-): Promise<Record<number, number>> {
-    const map: Record<number, number> = {};
+): Promise<Record<string, number>> {
+    const map: Record<string, number> = {};
     if (!pids?.length) return map;
 
     // Validate that the operator can view every problem (throws on missing/hidden).
@@ -275,7 +302,7 @@ export const CourseModel = {
         const doc = await DocumentModel.get(domainId, TYPE_COURSE, cid);
         if (!doc) return null;
         const cdoc = doc as unknown as CourseDoc;
-        if (cdoc.chapters?.length) cdoc.pids = flattenCoursePids(cdoc.chapters);
+        if (cdoc.chapters?.length) cdoc.pids = flattenCoursePids(cdoc.chapters) as number[];
         return cdoc;
     },
 
@@ -333,7 +360,7 @@ export const CourseModel = {
         const targetDomain = await DomainModel.get(target);
         if (!targetDomain) throw new NotFoundError(target);
 
-        const sourcePids = flattenCoursePids(cdoc.chapters).length ? flattenCoursePids(cdoc.chapters) : cdoc.pids;
+        const sourcePids = (flattenCoursePids(cdoc.chapters).length ? flattenCoursePids(cdoc.chapters) : cdoc.pids) as number[];
         const pidMap = await copyCourseProblems(domainId, sourcePids, target, canViewHidden);
         const pids = sourcePids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
         const chapters = cdoc.chapters?.length ? remapCourseChapters(cdoc.chapters, pidMap) : undefined;
@@ -406,7 +433,7 @@ export const CourseModel = {
         const tcdoc = await CourseModel.get(target, ref.docId);
         if (!tcdoc) throw new CourseNotFoundError(target, ref.docId);
 
-        const sourcePids = flattenCoursePids(cdoc.chapters).length ? flattenCoursePids(cdoc.chapters) : cdoc.pids;
+        const sourcePids = (flattenCoursePids(cdoc.chapters).length ? flattenCoursePids(cdoc.chapters) : cdoc.pids) as number[];
         const pidMap = await copyCourseProblems(domainId, sourcePids, target, canViewHidden);
         const pids = sourcePids.map((pid) => pidMap[pid]).filter((pid) => pid != null);
         const chapters = cdoc.chapters?.length ? remapCourseChapters(cdoc.chapters, pidMap) : undefined;
@@ -582,9 +609,9 @@ class CourseDetailHandler extends Handler {
 
         // New courses store nested chapters, while the flat `pids` field is kept
         // in sync. Fall back to it for legacy data.
-        const coursePids = flattenCoursePids(this.cdoc.chapters).length
+        const coursePids = (flattenCoursePids(this.cdoc.chapters).length
             ? flattenCoursePids(this.cdoc.chapters)
-            : this.cdoc.pids;
+            : this.cdoc.pids) as number[];
         const pdict = await ProblemModel.getList(domainId, coursePids, true, true);
 
         let psdict = {};
@@ -703,9 +730,11 @@ class CourseEditHandler extends Handler {
         classes: string[] = [],
     ) {
         const chapters = _chapters ? parseCourseChapters(_chapters) : [];
-        const pids = _chapters
+        const rawPids = _chapters
             ? flattenCoursePids(chapters)
-            : _pids.replace(/，/g, ',').split(',').map((i) => +i).filter((i) => i);
+            : _pids.replace(/，/g, ',').split(',').map((i) => i.trim()).filter((i) => i);
+        const { pids, pidMap } = await resolveProblemIds(domainId, rawPids);
+        const resolvedChapters = _chapters ? remapCourseChapters(chapters, pidMap) : [];
 
         if (pids.length) {
             await ProblemModel.getList(domainId, pids, this.user.hasPerm(PERM.PERM_VIEW_PROBLEM_HIDDEN) || this.user._id, true);
@@ -717,7 +746,7 @@ class CourseEditHandler extends Handler {
                 teachers,
                 assign,
                 classes,
-                ...(_chapters ? { chapters } : {}),
+                ...(_chapters ? { chapters: resolvedChapters } : {}),
             });
         } else {
             await CourseModel.edit(domainId, cid, {
@@ -728,7 +757,7 @@ class CourseEditHandler extends Handler {
                 teachers,
                 assign,
                 classes,
-                ...(_chapters ? { chapters } : {}),
+                ...(_chapters ? { chapters: resolvedChapters } : {}),
             });
         }
 
