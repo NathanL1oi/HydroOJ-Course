@@ -18,7 +18,7 @@
       <div class="section__header">
         <h1 class="section__title">{{ cdoc.title }}</h1>
         <div class="section__tools">
-          {% if handler.user.own(cdoc) or handler.user.hasPerm(PERM.PERM_EDIT_HOMEWORK) %}
+          {% if handler.user.own(cdoc) or handler.user.hasPerm(perm.PERM_EDIT_HOMEWORK) %}
           <a href="{{ url('course_edit', cid=cdoc.docId) }}" class="tool-button" data-tooltip="{{ _('Edit') }}">
             <span class="icon icon-edit"></span>
           </a>
@@ -146,7 +146,7 @@
     <div class="section">
       <div class="section__header">
         <h1 class="section__title">{{ _('Discussion') }}</h1>
-        {% if handler.user.hasPerm(PERM.PERM_CREATE_DISCUSSION) %}
+        {% if handler.user.hasPerm(perm.PERM_CREATE_DISCUSSION) %}
         <a href="{{ url('discussion_create', type=50, docId=cdoc.docId) }}" class="primary rounded button">
           {{ _('New Discussion') }}
         </a>
