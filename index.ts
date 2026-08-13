@@ -150,6 +150,16 @@ async function copyCourseFiles(
     return copied;
 }
 
+// Inject the course entry into the top navigation bar, after Training and
+// before Contest. HydroOJ exposes this as `ctx.injectUI` (wired to the UI
+// `inject` helper), with `global.Hydro.ui.inject` as a fallback for older
+// releases. Note: `ctx.inject` is Cordis dependency injection, not the UI API.
+function injectCourseNav(ctx: Context) {
+    const ui = (ctx as any).injectUI ?? (globalThis as any).Hydro?.ui?.inject;
+    if (typeof ui !== 'function') return;
+    ui('Nav', 'course_main', { prefix: 'course', before: 'contest_main' }, PERM.PERM_VIEW_HOMEWORK);
+}
+
 // Course Model
 export const CourseModel = {
     TYPE_COURSE,
@@ -956,6 +966,9 @@ export async function apply(ctx: Context) {
     ctx.Route('course_scoreboard', '/course/:cid/scoreboard', CourseScoreboardHandler, PERM.PERM_VIEW_HOMEWORK_SCOREBOARD);
     ctx.Route('course_records', '/course/:cid/records', CourseRecordsHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_share', '/course/:cid/share', CourseShareHandler, PERM.PERM_VIEW_HOMEWORK);
+
+    // Navigation entry: after Training, before Contest.
+    injectCourseNav(ctx);
 
     ctx.i18n.load('zh', {
         course: '课程',

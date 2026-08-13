@@ -102,6 +102,10 @@ Notes:
 - The share page is only reachable from the source course; shared copies show a
   "Shared from domain ..." banner linking back to the original course.
 
+## Navigation
+
+The course entry appears in the top navigation bar, positioned after Training and before Contest.
+
 ## Compatibility
 
 - HydroOJ v5 beta-16 or later
