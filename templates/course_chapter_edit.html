@@ -1,0 +1,112 @@
+{% extends "layout/basic.html" %}
+{% block content %}
+<div class="row">
+  <div class="medium-9 columns">
+    <div class="section">
+      <div class="section__header">
+        <h1 class="section__title">
+          <a href="{{ url('course_detail', cid=cdoc.docId) }}">{{ cdoc.title }}</a>
+          {% for node in chapterPath %}
+          <span class="text-muted">/</span>
+          {% if loop.last %}
+          {{ _('Edit') }}: {{ node.title }}
+          {% else %}
+          <a href="{{ url('course_chapter', cid=cdoc.docId, chapterId=node._id) }}">{{ node.title }}</a>
+          {% endif %}
+          {% endfor %}
+        </h1>
+      </div>
+      <div class="section__body">
+        <form method="post">
+          <input type="hidden" name="operation" value="update">
+          <div class="row">
+            <div class="columns">
+              <label>{{ _('Title') }}</label>
+              <input type="text" name="title" value="{{ chapter.title }}" required>
+            </div>
+          </div>
+          <div class="row">
+            <div class="columns">
+              <label>{{ _('Introduction') }}</label>
+              <textarea name="content" class="textbox monospace" data-markdown>{{ chapter.content }}</textarea>
+            </div>
+          </div>
+          <div class="row">
+            <div class="columns">
+              <label>{{ _('Problem IDs') }} ({{ _('comma separated') }})</label>
+              <input type="text" name="pids" value="{{ pids }}" placeholder="1001, 1002, P1003">
+            </div>
+          </div>
+          <div class="row">
+            <div class="columns">
+              <button type="submit" class="rounded primary button">{{ _('Save') }}</button>
+              <a href="{{ url('course_chapter', cid=cdoc.docId, chapterId=chapter._id) }}" class="rounded button">{{ _('Cancel') }}</a>
+            </div>
+          </div>
+        </form>
+
+        <hr>
+        <h2>{{ _('Subchapters') }}</h2>
+        {% if chapter.children and chapter.children|length > 0 %}
+        <ul class="menu">
+          {% for child in chapter.children %}
+          <li class="menu__item">
+            <a href="{{ url('course_chapter', cid=cdoc.docId, chapterId=child._id) }}">
+              <span class="icon icon-folder"></span>
+              {{ child.title }}
+              <span class="text-muted">({{ (child.pids or [])|length }} {{ _('problems') }})</span>
+            </a>
+            <a href="{{ url('course_chapter_edit', cid=cdoc.docId, chapterId=child._id) }}" class="rounded button">{{ _('Edit') }}</a>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="text-muted">{{ _('No subchapters yet.') }}</p>
+        {% endif %}
+
+        <form method="post">
+          <input type="hidden" name="operation" value="add_child">
+          <div class="row">
+            <div class="columns medium-8">
+              <input type="text" name="title" placeholder="{{ _('New subchapter title') }}" required>
+            </div>
+            <div class="columns medium-4">
+              <button type="submit" class="rounded primary button">{{ _('Add Subchapter') }}</button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="medium-3 columns">
+    <div class="section side">
+      <div class="section__header">
+        <h1 class="section__title">{{ _('Quick Links') }}</h1>
+      </div>
+      <div class="section__body">
+        <ul class="menu">
+          <li class="menu__item">
+            <a href="{{ url('course_chapter', cid=cdoc.docId, chapterId=chapter._id) }}">
+              <span class="icon icon-back"></span>
+              {{ _('Back to Chapter') }}
+            </a>
+          </li>
+          <li class="menu__item">
+            <a href="{{ url('course_detail', cid=cdoc.docId) }}">
+              <span class="icon icon-back"></span>
+              {{ _('Back to Course') }}
+            </a>
+          </li>
+          <li class="menu__item">
+            <a href="{{ url('course_edit', cid=cdoc.docId) }}">
+              <span class="icon icon-edit"></span>
+              {{ _('Edit Course') }}
+            </a>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

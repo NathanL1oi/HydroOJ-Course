@@ -16,6 +16,11 @@
           {% endfor %}
         </h1>
         <div class="section__tools">
+          {% if canEditChapter %}
+          <a href="{{ url('course_chapter_edit', cid=cdoc.docId, chapterId=chapter._id) }}" class="tool-button" data-tooltip="{{ _('Edit Chapter') }}">
+            <span class="icon icon-edit"></span>
+          </a>
+          {% endif %}
           <a href="{{ url('course_detail', cid=cdoc.docId) }}" class="tool-button" data-tooltip="{{ _('Back to Course') }}">
             <span class="icon icon-back"></span>
           </a>

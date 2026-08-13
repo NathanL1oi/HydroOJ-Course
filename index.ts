@@ -148,6 +148,48 @@ function findChapterPath(chapters: CourseChapter[], targetId: number): CourseCha
     return visit(chapters, []);
 }
 
+// Return a new chapter id that does not collide with any existing chapter id.
+function nextChapterId(chapters: CourseChapter[]): number {
+    let max = 0;
+    const visit = (nodes: CourseChapter[]) => {
+        for (const node of nodes) {
+            if (Number(node._id) > max) max = Number(node._id);
+            visit(node.children || []);
+        }
+    };
+    visit(chapters);
+    return max + 1;
+}
+
+// Mutate the chapter with `targetId` in-place. Returns true when found.
+function updateChapterInTree(
+    chapters: CourseChapter[],
+    targetId: number,
+    updater: (chapter: CourseChapter) => CourseChapter,
+): boolean {
+    for (let i = 0; i < chapters.length; i++) {
+        if (Number(chapters[i]._id) === targetId) {
+            chapters[i] = updater(chapters[i]);
+            return true;
+        }
+        if (updateChapterInTree(chapters[i].children || [], targetId, updater)) return true;
+    }
+    return false;
+}
+
+// Add a child chapter under `parentId` in-place. Returns true when found.
+function addChildChapter(chapters: CourseChapter[], parentId: number, child: CourseChapter): boolean {
+    for (const node of chapters) {
+        if (Number(node._id) === parentId) {
+            node.children = node.children || [];
+            node.children.push(child);
+            return true;
+        }
+        if (addChildChapter(node.children || [], parentId, child)) return true;
+    }
+    return false;
+}
+
 // Resolve raw problem identifiers to numeric doc ids. Numeric strings are
 // treated as doc ids (matching HydroOJ's own problem URL handling); anything
 // else is treated as a problem pid string such as "P1001".
@@ -729,6 +771,9 @@ class CourseChapterHandler extends Handler {
         }
 
         this.response.template = 'course_chapter.html';
+        const canEditChapter = this.user.own(this.cdoc)
+            ? this.user.hasPerm(PERM.PERM_EDIT_HOMEWORK_SELF)
+            : this.user.hasPerm(PERM.PERM_EDIT_HOMEWORK);
         this.response.body = {
             cdoc: this.cdoc,
             chapter,
@@ -736,7 +781,92 @@ class CourseChapterHandler extends Handler {
             chapterPids,
             pdict,
             psdict,
+            canEditChapter,
         };
+    }
+}
+
+// Course Chapter Edit Handler
+class CourseChapterEditHandler extends Handler {
+    cdoc: CourseDoc;
+    chapterPath: CourseChapter[];
+    chapters: CourseChapter[];
+
+    @param('cid', Types.ObjectId)
+    @param('chapterId', Types.PositiveInt)
+    async prepare(domainId: string, cid: ObjectId, chapterId: number) {
+        this.cdoc = await CourseModel.get(domainId, cid);
+        if (!this.cdoc) throw new CourseNotFoundError(domainId, cid);
+
+        if (!this.user.own(this.cdoc)) this.checkPerm(PERM.PERM_EDIT_HOMEWORK);
+        else this.checkPerm(PERM.PERM_EDIT_HOMEWORK_SELF);
+
+        this.chapters = JSON.parse(JSON.stringify(this.cdoc.chapters || []));
+        const chapterPath = findChapterPath(this.chapters, chapterId);
+        if (!chapterPath) throw new NotFoundError('Chapter', String(chapterId));
+        this.chapterPath = chapterPath;
+    }
+
+    @param('cid', Types.ObjectId)
+    @param('chapterId', Types.PositiveInt)
+    async get(domainId: string, cid: ObjectId, chapterId: number) {
+        const chapter = this.chapterPath[this.chapterPath.length - 1];
+        this.response.template = 'course_chapter_edit.html';
+        this.response.body = {
+            cdoc: this.cdoc,
+            chapter,
+            chapterPath: this.chapterPath,
+            pids: (chapter.pids || []).join(', '),
+        };
+    }
+
+    @param('cid', Types.ObjectId)
+    @param('chapterId', Types.PositiveInt)
+    @param('title', Types.Title)
+    @param('content', Types.Content)
+    @param('pids', Types.Content, true)
+    async postUpdate(
+        domainId: string,
+        cid: ObjectId,
+        chapterId: number,
+        title: string,
+        content: string,
+        _pids: string = '',
+    ) {
+        const rawPids = _pids.replace(/，/g, ',').split(',').map((i) => i.trim()).filter((i) => i);
+        const { pids } = await resolveProblemIds(domainId, rawPids);
+        if (pids.length) {
+            await ProblemModel.getList(domainId, pids, this.user.hasPerm(PERM.PERM_VIEW_PROBLEM_HIDDEN) || this.user._id, true);
+        }
+        if (!updateChapterInTree(this.chapters, chapterId, (chapter) => ({ ...chapter, title, content, pids }))) {
+            throw new NotFoundError('Chapter', String(chapterId));
+        }
+        await CourseModel.edit(domainId, cid, {
+            chapters: this.chapters,
+            pids: flattenCoursePids(this.chapters) as number[],
+        } as any);
+        this.response.redirect = this.url('course_chapter', { cid, chapterId });
+    }
+
+    @param('cid', Types.ObjectId)
+    @param('chapterId', Types.PositiveInt)
+    @param('title', Types.Title)
+    async postAddChild(domainId: string, cid: ObjectId, chapterId: number, title: string) {
+        const child: CourseChapter = {
+            _id: nextChapterId(this.chapters),
+            title,
+            content: '',
+            pids: [],
+            children: [],
+        };
+        if (!addChildChapter(this.chapters, chapterId, child)) {
+            throw new NotFoundError('Chapter', String(chapterId));
+        }
+        await CourseModel.edit(domainId, cid, {
+            chapters: this.chapters,
+            pids: flattenCoursePids(this.chapters) as number[],
+        } as any);
+        this.response.redirect = this.url('course_chapter_edit', { cid, chapterId: child._id });
     }
 }
 
@@ -1099,6 +1229,7 @@ export async function apply(ctx: Context) {
     ctx.Route('course_create', '/course/create', CourseEditHandler);
     ctx.Route('course_detail', '/course/:cid', CourseDetailHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_chapter', '/course/:cid/chapter/:chapterId', CourseChapterHandler, PERM.PERM_VIEW_HOMEWORK);
+    ctx.Route('course_chapter_edit', '/course/:cid/chapter/:chapterId/edit', CourseChapterEditHandler);
     ctx.Route('course_edit', '/course/:cid/edit', CourseEditHandler);
     ctx.Route('course_files', '/course/:cid/file', CourseFilesHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_file_download', '/course/:cid/file/:filename', CourseFileDownloadHandler, PERM.PERM_VIEW_HOMEWORK);
@@ -1142,6 +1273,11 @@ export async function apply(ctx: Context) {
         'subchapters': '个子章节',
         'Subchapters': '子章节',
         'Problems': '题目',
+        'Edit Chapter': '编辑章节',
+        'No subchapters yet.': '暂无子章节。',
+        'New subchapter title': '新子章节标题',
+        'Add Subchapter': '添加子章节',
+        'Back to Chapter': '返回章节',
         'Back to Course': '返回课程',
         'No problems in this chapter.': '本章节暂无题目。',
         'No courses found.': '暂无课程。',
@@ -1212,6 +1348,11 @@ export async function apply(ctx: Context) {
         'subchapters': 'subchapters',
         'Subchapters': 'Subchapters',
         'Problems': 'Problems',
+        'Edit Chapter': 'Edit Chapter',
+        'No subchapters yet.': 'No subchapters yet.',
+        'New subchapter title': 'New subchapter title',
+        'Add Subchapter': 'Add Subchapter',
+        'Back to Chapter': 'Back to Chapter',
         'Back to Course': 'Back to Course',
         'No problems in this chapter.': 'No problems in this chapter.',
         'No courses found.': 'No courses found.',
