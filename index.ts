@@ -919,6 +919,15 @@ class CourseEditHandler extends Handler {
         const groups = await UserModel.listGroup(domainId);
         const chapters = courseChaptersForEditor(this.cdoc);
 
+        let source: { ddoc: any; cdoc: CourseDoc } | null = null;
+        if (this.cdoc?.reference) {
+            const [ddoc, scdoc] = await Promise.all([
+                DomainModel.get(this.cdoc.reference.domainId),
+                CourseModel.get(this.cdoc.reference.domainId, this.cdoc.reference.docId),
+            ]);
+            if (ddoc && scdoc) source = { ddoc, cdoc: scdoc };
+        }
+
         this.response.template = 'course_edit.html';
         this.response.body = {
             cdoc: this.cdoc,
@@ -927,6 +936,7 @@ class CourseEditHandler extends Handler {
             pids: this.cdoc ? this.cdoc.pids.join(',') : '',
             chaptersJson: JSON.stringify(chapters),
             canShare: !!(cid && this.cdoc && !this.cdoc.reference),
+            source,
         };
     }
 

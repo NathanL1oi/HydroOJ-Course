@@ -56,20 +56,6 @@
 </style>
 <div class="row">
   <div class="large-9 columns">
-    {% if source %}
-    <div class="section">
-      <div class="section__body typo">
-        <blockquote class="note">
-          <p>
-            <span class="icon icon-link"></span>
-            {{ _('Shared from domain') }} <strong>{{ source.ddoc.name or source.ddoc._id }}</strong>:
-            <a href="{{ url('course_detail', domainId=source.ddoc._id, cid=source.cdoc.docId) }}">{{ source.cdoc.title }}</a>
-          </p>
-        </blockquote>
-      </div>
-    </div>
-    {% endif %}
-
     <div class="section">
       <div class="section__header">
         <h1 class="section__title">{{ _('Course') }}: {{ cdoc.title }}</h1>
