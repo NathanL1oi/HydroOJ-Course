@@ -133,7 +133,7 @@
             </a>
           </li>
           <li class="menu__item">
-            <a class="menu__link" href="{{ url('course_scoreboard', cid=cdoc.docId) }}">
+            <a class="menu__link" href="{{ url('course_chapter_scoreboard', cid=cdoc.docId, chapterId=chapter._id) }}">
               <span class="icon icon-statistics"></span>
               {{ _('Scoreboard') }}
             </a>

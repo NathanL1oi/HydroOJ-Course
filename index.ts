@@ -1258,6 +1258,70 @@ class CourseScoreboardHandler extends Handler {
         this.response.template = 'course_scoreboard.html';
         this.response.body = {
             cdoc,
+            chapter: null,
+            pids: cdoc.pids,
+            pdict,
+            rows,
+            page,
+            cpcount,
+        };
+    }
+}
+
+// Scoreboard for a single chapter and its nested subchapters.
+class CourseChapterScoreboardHandler extends Handler {
+    cdoc: CourseDoc;
+    chapter: CourseChapter;
+    chapterPids: number[];
+
+    @param('cid', Types.ObjectId)
+    @param('chapterId', Types.PositiveInt)
+    async prepare(domainId: string, cid: ObjectId, chapterId: number) {
+        this.cdoc = await CourseModel.get(domainId, cid);
+        if (!this.cdoc) throw new CourseNotFoundError(domainId, cid);
+        const chapterPath = findChapterPath(this.cdoc.chapters || [], chapterId);
+        if (!chapterPath) throw new NotFoundError('Chapter', String(chapterId));
+        this.chapter = chapterPath[chapterPath.length - 1];
+        this.chapterPids = (flattenCoursePids([this.chapter]) as number[])
+            .filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+    }
+
+    @param('cid', Types.ObjectId)
+    @param('chapterId', Types.PositiveInt)
+    @param('page', Types.PositiveInt, true)
+    async get(domainId: string, cid: ObjectId, chapterId: number, page = 1) {
+        this.checkPerm(PERM.PERM_VIEW_HOMEWORK_SCOREBOARD);
+
+        const cursor = CourseModel.getMultiStatus(domainId, { docId: cid, attend: 1 });
+        const [csdocs, cpcount] = await this.paginate(cursor, page, 'scoreboard');
+
+        const uids = csdocs.map((csdoc) => csdoc.uid);
+        const udict = await UserModel.getListForRender(domainId, uids);
+        const pdict = await ProblemModel.getList(domainId, this.chapterPids, true, true);
+
+        const rows: any[] = [];
+        for (const csdoc of csdocs) {
+            const row: any = {
+                uid: csdoc.uid,
+                user: udict[csdoc.uid],
+                scores: {},
+                totalScore: 0,
+            };
+            for (const pid of this.chapterPids) {
+                const progress = (csdoc.journal || []).find((j) => j.pid === pid);
+                row.scores[pid] = progress?.score || 0;
+                row.totalScore += progress?.score || 0;
+            }
+            rows.push(row);
+        }
+
+        rows.sort((a, b) => b.totalScore - a.totalScore);
+
+        this.response.template = 'course_scoreboard.html';
+        this.response.body = {
+            cdoc: this.cdoc,
+            chapter: this.chapter,
+            pids: this.chapterPids,
             pdict,
             rows,
             page,
@@ -1349,6 +1413,7 @@ export async function apply(ctx: Context) {
     ctx.Route('course_detail', '/course/:cid', CourseDetailHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_chapter', '/course/:cid/chapter/:chapterId', CourseChapterHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_chapter_edit', '/course/:cid/chapter/:chapterId/edit', CourseChapterEditHandler);
+    ctx.Route('course_chapter_scoreboard', '/course/:cid/chapter/:chapterId/scoreboard', CourseChapterScoreboardHandler, PERM.PERM_VIEW_HOMEWORK_SCOREBOARD);
     ctx.Route('course_edit', '/course/:cid/edit', CourseEditHandler);
     ctx.Route('course_files', '/course/:cid/file', CourseFilesHandler, PERM.PERM_VIEW_HOMEWORK);
     ctx.Route('course_file_download', '/course/:cid/file/:filename', CourseFileDownloadHandler, PERM.PERM_VIEW_HOMEWORK);

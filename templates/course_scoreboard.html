@@ -1,25 +1,41 @@
 {% extends "layout/basic.html" %}
 {% import "components/paginator.html" as paginator with context %}
 {% block content %}
+<style>
+  .scoreboard-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .scoreboard-scroll table {
+    min-width: 100%;
+    white-space: nowrap;
+  }
+</style>
 <div class="row">
   <div class="medium-12 columns">
     <div class="section">
       <div class="section__header">
-        <h1 class="section__title">{{ _('Scoreboard') }} - {{ cdoc.title }}</h1>
+        <h1 class="section__title">{{ _('Scoreboard') }} - {{ cdoc.title }}{% if chapter %} / {{ chapter.title }}{% endif %}</h1>
         <div class="section__tools">
+          {% if chapter %}
+          <a href="{{ url('course_chapter', cid=cdoc.docId, chapterId=chapter._id) }}" class="tool-button" data-tooltip="{{ _('Back to Chapter') }}">
+            <span class="icon icon-back"></span>
+          </a>
+          {% else %}
           <a href="{{ url('course_detail', cid=cdoc.docId) }}" class="tool-button" data-tooltip="{{ _('Back to Course') }}">
             <span class="icon icon-back"></span>
           </a>
+          {% endif %}
         </div>
       </div>
       <div class="section__body">
         {% if rows|length > 0 %}
-        <div class="table-responsive">
+        <div class="scoreboard-scroll">
           <table class="data-table scoreboard">
             <colgroup>
               <col class="col--rank" style="width: 60px;">
               <col class="col--user">
-              {% for pid in cdoc.pids %}
+              {% for pid in pids %}
               <col class="col--problem">
               {% endfor %}
               <col class="col--total">
@@ -28,7 +44,7 @@
               <tr>
                 <th class="col--rank">#</th>
                 <th class="col--user">{{ _('Student') }}</th>
-                {% for pid in cdoc.pids %}
+                {% for pid in pids %}
                 <th class="col--problem">
                   {% if pdict[pid] %}
                   <a href="{{ url('problem_detail', pid=pid) }}" title="{{ pdict[pid].title }}">
@@ -53,7 +69,7 @@
                   {{ _('Unknown User') }}
                   {% endif %}
                 </td>
-                {% for pid in cdoc.pids %}
+                {% for pid in pids %}
                 <td class="col--problem">
                   {% set score = row.scores[pid] %}
                   <span class="{% if score >= 100 %}pass{% elif score > 0 %}fail{% endif %}">
