@@ -4,11 +4,16 @@
 <style>
   .scoreboard-scroll {
     overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
+    overflow-y: hidden;
   }
   .scoreboard-scroll table {
+    table-layout: auto;
     min-width: 100%;
-    white-space: nowrap;
+  }
+  .scoreboard-scroll thead th {
+    position: static;
+    top: auto;
+    z-index: auto;
   }
 </style>
 <div class="row">
